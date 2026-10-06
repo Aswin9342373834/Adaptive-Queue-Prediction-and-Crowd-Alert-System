@@ -5,9 +5,18 @@ ESP32 physical hardware alert client, and real-time WebSocket broadcasting with 
 """
 
 import asyncio
+import os
+import sys
 import threading
 import time
+from pathlib import Path
 from typing import Dict, Any, Optional
+
+# Ensure project root is in sys.path so root modules (config, camera, tracker, etc.) and backend package resolve
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 import cv2
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
 from fastapi.middleware.cors import CORSMiddleware
@@ -197,9 +206,16 @@ def vision_pipeline_worker():
                     "status": "WAITING",
                     "estimated_wait": item["wait_str"],
                     "wait_seconds": item["wait_seconds"],
+                    "customer_name": next((t.customer_name for t in queue_mgr.tokens if t.token_id == item["token_id"]), ""),
+                    "mobile_number": next((t.mobile_number for t in queue_mgr.tokens if t.token_id == item["token_id"]), ""),
+                    "service_type": next((t.service_type for t in queue_mgr.tokens if t.token_id == item["token_id"]), "General Banking"),
+                    "assigned_counter": next((t.assigned_counter for t in queue_mgr.tokens if t.token_id == item["token_id"]), 3),
+                    "customer_id": next((t.customer_id for t in queue_mgr.tokens if t.token_id == item["token_id"]), ""),
+                    "created_at": next((t.created_at for t in queue_mgr.tokens if t.token_id == item["token_id"]), now),
                 }
                 for item in w_est.get("waiting_estimates", [])
             ],
+            "counters": queue_mgr.get_counters_info(),
             "hardware_flags": alert_st.get("hardware", {}),
             "last_action": q_sum.get("last_action", "System ready"),
         }
@@ -272,7 +288,7 @@ async def get_system_status():
 
 @app.get("/api/queue")
 async def get_queue_data():
-    """Returns current queue state, active tokens, and waiting estimates."""
+    """Returns current queue state, active tokens, waiting estimates, and counters status."""
     now = time.time()
     q_sum = queue_mgr.get_summary()
     w_est = estimator.get_queue_estimates(queue_mgr, current_time=now)
@@ -288,10 +304,75 @@ async def get_queue_data():
                 "service_start_at": t.service_start_at,
                 "completed_at": t.completed_at,
                 "service_duration_seconds": t.service_duration_seconds,
+                "customer_name": t.customer_name,
+                "mobile_number": t.mobile_number,
+                "service_type": t.service_type,
+                "assigned_counter": t.assigned_counter,
+                "customer_id": t.customer_id,
             }
             for t in queue_mgr.tokens
         ],
+        "counters": queue_mgr.get_counters_info(),
     }
+
+
+@app.get("/api/queue/public")
+async def get_public_queue_data():
+    """
+    Public television queue display endpoint.
+    Returns clean customer-facing queue status, now serving token, wait time, and next tokens.
+    Guarantees that customer PII (names, phone numbers) is not exposed on public displays.
+    """
+    now = time.time()
+    q_sum = queue_mgr.get_summary()
+    w_est = estimator.get_queue_estimates(queue_mgr, current_time=now)
+
+    serving_token_obj = queue_mgr.get_serving_token() or queue_mgr.get_current_token()
+    now_serving = None
+    if serving_token_obj:
+        now_serving = {
+            "token": serving_token_obj.token_id,
+            "counter": serving_token_obj.assigned_counter,
+        }
+
+    waiting_tokens = [t for t in queue_mgr.tokens if t.status == "WAITING"]
+    people_waiting = max(len(waiting_tokens), latest_telemetry.get("waiting_area_count", len(waiting_tokens)))
+
+    avg_sec = w_est.get("avg_service_time_seconds", 180.0)
+    est_wait = round((avg_sec / 60.0) * max(1, len(waiting_tokens)))
+
+    next_list = []
+    for tok in waiting_tokens[:8]:
+        next_list.append({
+            "token": tok.token_id,
+            "counter": tok.assigned_counter,
+        })
+
+    counters_info = queue_mgr.get_counters_info()
+    active_cnt = sum(1 for c in counters_info if c["active"])
+
+    return {
+        "nowServing": now_serving,
+        "peopleWaiting": people_waiting,
+        "estimatedWaitMinutes": est_wait,
+        "activeCounters": active_cnt,
+        "totalCounters": len(counters_info),
+        "nextTokens": next_list,
+    }
+
+
+@app.get("/api/counters")
+async def get_counters():
+    """Returns real-time status and load for all bank service counters."""
+    return {
+        "counters": queue_mgr.get_counters_info(),
+    }
+
+
+@app.get("/api/counters/recommend")
+async def get_counter_recommendation(service_type: str = "General Banking"):
+    """Returns smart counter recommendation based on service type and shortest queue."""
+    return queue_mgr.recommend_counter(service_type)
 
 
 @app.get("/api/analytics")
@@ -341,40 +422,102 @@ async def post_hardware_test(payload: Dict[str, Any] = Body(...)):
 
 
 # ==============================================================================
-# Token Action Endpoints
+# Token Action Endpoints (Counter-Aware & Registration-Enabled)
 # ==============================================================================
 
 @app.post("/api/tokens/generate")
-async def api_generate_token():
-    """Generates a new token in WAITING state."""
-    tok = queue_mgr.generate_token()
-    return {"status": "success", "token_id": tok.token_id, "token_status": tok.status}
+async def api_generate_token(payload: Optional[Dict[str, Any]] = Body(default=None)):
+    """
+    Generates a new token in WAITING state with customer metadata and assigned counter.
+    Payload: { "customer_name": str, "mobile_number": str, "service_type": str, "assigned_counter": int, "customer_id": str }
+    """
+    data = payload or {}
+    cust_name = data.get("customer_name", "")
+    phone = data.get("mobile_number", "")
+    service = data.get("service_type", "General Banking")
+    counter = data.get("assigned_counter")
+    cust_id = data.get("customer_id", "")
+
+    tok = queue_mgr.generate_token(
+        customer_name=cust_name,
+        mobile_number=phone,
+        service_type=service,
+        assigned_counter=counter,
+        customer_id=cust_id,
+    )
+    return {
+        "status": "success",
+        "token_id": tok.token_id,
+        "token_status": tok.status,
+        "customer_name": tok.customer_name,
+        "mobile_number": tok.mobile_number,
+        "service_type": tok.service_type,
+        "assigned_counter": tok.assigned_counter,
+        "customer_id": tok.customer_id,
+        "created_at": tok.created_at,
+    }
 
 
 @app.post("/api/tokens/call_next")
-async def api_call_next():
-    """Calls the next waiting token in line."""
-    tok = queue_mgr.call_next()
+async def api_call_next(payload: Optional[Dict[str, Any]] = Body(default=None)):
+    """
+    Calls the next waiting token in line for a specific counter (or any waiting token).
+    Payload: { "counter": int }
+    """
+    data = payload or {}
+    counter = data.get("counter")
+    tok = queue_mgr.call_next(counter=counter)
     if tok:
-        return {"status": "success", "token_id": tok.token_id, "token_status": tok.status}
+        return {
+            "status": "success",
+            "token_id": tok.token_id,
+            "token_status": tok.status,
+            "assigned_counter": tok.assigned_counter,
+            "customer_name": tok.customer_name,
+            "service_type": tok.service_type,
+        }
     return {"status": "no_waiting_tokens", "token_id": None}
 
 
 @app.post("/api/tokens/start_service")
-async def api_start_service():
-    """Transitions the called token to SERVING."""
-    tok = queue_mgr.start_service()
+async def api_start_service(payload: Optional[Dict[str, Any]] = Body(default=None)):
+    """
+    Transitions the called token to SERVING.
+    Payload: { "counter": int }
+    """
+    data = payload or {}
+    counter = data.get("counter")
+    tok = queue_mgr.start_service(counter=counter)
     if tok:
-        return {"status": "success", "token_id": tok.token_id, "token_status": tok.status}
+        return {
+            "status": "success",
+            "token_id": tok.token_id,
+            "token_status": tok.status,
+            "assigned_counter": tok.assigned_counter,
+            "customer_name": tok.customer_name,
+            "service_type": tok.service_type,
+        }
     return {"status": "no_token_to_serve", "token_id": None}
 
 
 @app.post("/api/tokens/complete_service")
-async def api_complete_service():
-    """Completes the currently serving token."""
-    tok = queue_mgr.complete_service()
+async def api_complete_service(payload: Optional[Dict[str, Any]] = Body(default=None)):
+    """
+    Completes the currently serving token.
+    Payload: { "counter": int }
+    """
+    data = payload or {}
+    counter = data.get("counter")
+    tok = queue_mgr.complete_service(counter=counter)
     if tok:
-        return {"status": "success", "token_id": tok.token_id, "token_status": tok.status}
+        return {
+            "status": "success",
+            "token_id": tok.token_id,
+            "token_status": tok.status,
+            "assigned_counter": tok.assigned_counter,
+            "customer_name": tok.customer_name,
+            "service_type": tok.service_type,
+        }
     return {"status": "no_active_service", "token_id": None}
 
 

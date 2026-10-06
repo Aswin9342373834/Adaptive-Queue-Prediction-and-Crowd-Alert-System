@@ -6,6 +6,38 @@ export interface WaitingCustomer {
   status: string;
   estimated_wait: string;
   wait_seconds: number;
+  customer_name?: string;
+  mobile_number?: string;
+  service_type?: string;
+  assigned_counter?: number;
+  customer_id?: string;
+  created_at?: number;
+}
+
+export interface CounterInfo {
+  counter: number;
+  name: string;
+  officer: string;
+  services: string[];
+  active: boolean;
+  waiting_count: number;
+  current_serving: string | null;
+}
+
+export interface CounterRecommendation {
+  recommended_counter: number;
+  counter_name: string;
+  officer_name: string;
+  waiting_count: number;
+  reason: string;
+}
+
+export interface GenerateTokenPayload {
+  customer_name: string;
+  mobile_number: string;
+  service_type: string;
+  assigned_counter?: number;
+  customer_id?: string;
 }
 
 export interface HardwareFlags {
@@ -49,6 +81,7 @@ export interface TelemetryData {
   alert_message: string;
   is_long_wait: boolean;
   waiting_queue: WaitingCustomer[];
+  counters?: CounterInfo[];
   hardware_flags: HardwareFlags;
   last_action: string;
 }
@@ -57,6 +90,25 @@ export interface AlertEvent {
   timestamp: number;
   level: CongestionLevel;
   message: string;
+}
+
+export interface PublicNowServing {
+  token: string | null;
+  counter: number | null;
+}
+
+export interface PublicNextToken {
+  token: string;
+  counter: number;
+}
+
+export interface PublicQueueData {
+  nowServing: PublicNowServing | null;
+  peopleWaiting: number;
+  estimatedWaitMinutes: number;
+  activeCounters: number;
+  totalCounters: number;
+  nextTokens: PublicNextToken[];
 }
 
 export interface SystemStatus {
@@ -69,3 +121,4 @@ export interface SystemStatus {
   active_ws_clients: number;
   latest_fps: number;
 }
+

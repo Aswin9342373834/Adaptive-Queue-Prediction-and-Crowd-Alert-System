@@ -1,28 +1,89 @@
+import type { GenerateTokenPayload, CounterInfo, CounterRecommendation } from '../types/queue';
+
 const API_BASE_URL = 'http://localhost:8000';
 
 export const api = {
   // Token Controls
-  async generateToken(): Promise<{ status: string; token_id: string }> {
-    const res = await fetch(`${API_BASE_URL}/api/tokens/generate`, { method: 'POST' });
+  async generateToken(payload?: GenerateTokenPayload): Promise<{
+    status: string;
+    token_id: string;
+    token_status: string;
+    customer_name?: string;
+    mobile_number?: string;
+    service_type?: string;
+    assigned_counter?: number;
+    customer_id?: string;
+    created_at?: number;
+  }> {
+    const res = await fetch(`${API_BASE_URL}/api/tokens/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload || {}),
+    });
     if (!res.ok) throw new Error('Failed to generate token');
     return res.json();
   },
 
-  async callNext(): Promise<{ status: string; token_id: string | null }> {
-    const res = await fetch(`${API_BASE_URL}/api/tokens/call_next`, { method: 'POST' });
+  async callNext(counter?: number): Promise<{
+    status: string;
+    token_id: string | null;
+    token_status?: string;
+    assigned_counter?: number;
+    customer_name?: string;
+    service_type?: string;
+  }> {
+    const res = await fetch(`${API_BASE_URL}/api/tokens/call_next`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(counter ? { counter } : {}),
+    });
     if (!res.ok) throw new Error('Failed to call next token');
     return res.json();
   },
 
-  async startService(): Promise<{ status: string; token_id: string | null }> {
-    const res = await fetch(`${API_BASE_URL}/api/tokens/start_service`, { method: 'POST' });
+  async startService(counter?: number): Promise<{
+    status: string;
+    token_id: string | null;
+    token_status?: string;
+    assigned_counter?: number;
+    customer_name?: string;
+    service_type?: string;
+  }> {
+    const res = await fetch(`${API_BASE_URL}/api/tokens/start_service`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(counter ? { counter } : {}),
+    });
     if (!res.ok) throw new Error('Failed to start service');
     return res.json();
   },
 
-  async completeService(): Promise<{ status: string; token_id: string | null }> {
-    const res = await fetch(`${API_BASE_URL}/api/tokens/complete_service`, { method: 'POST' });
+  async completeService(counter?: number): Promise<{
+    status: string;
+    token_id: string | null;
+    token_status?: string;
+    assigned_counter?: number;
+    customer_name?: string;
+    service_type?: string;
+  }> {
+    const res = await fetch(`${API_BASE_URL}/api/tokens/complete_service`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(counter ? { counter } : {}),
+    });
     if (!res.ok) throw new Error('Failed to complete service');
+    return res.json();
+  },
+
+  async getCounters(): Promise<{ counters: CounterInfo[] }> {
+    const res = await fetch(`${API_BASE_URL}/api/counters`);
+    if (!res.ok) throw new Error('Failed to fetch counters');
+    return res.json();
+  },
+
+  async getCounterRecommendation(serviceType: string): Promise<CounterRecommendation> {
+    const res = await fetch(`${API_BASE_URL}/api/counters/recommend?service_type=${encodeURIComponent(serviceType)}`);
+    if (!res.ok) throw new Error('Failed to fetch counter recommendation');
     return res.json();
   },
 
@@ -42,6 +103,12 @@ export const api = {
   async getQueue() {
     const res = await fetch(`${API_BASE_URL}/api/queue`);
     if (!res.ok) throw new Error('Failed to fetch queue');
+    return res.json();
+  },
+
+  async getPublicQueue() {
+    const res = await fetch(`${API_BASE_URL}/api/queue/public`);
+    if (!res.ok) throw new Error('Failed to fetch public queue');
     return res.json();
   },
 
