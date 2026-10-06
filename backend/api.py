@@ -503,7 +503,7 @@ async def api_start_service(payload: Optional[Dict[str, Any]] = Body(default=Non
 @app.post("/api/tokens/complete_service")
 async def api_complete_service(payload: Optional[Dict[str, Any]] = Body(default=None)):
     """
-    Completes the currently serving token.
+    Completes the currently serving token for a counter.
     Payload: { "counter": int }
     """
     data = payload or {}
@@ -517,8 +517,31 @@ async def api_complete_service(payload: Optional[Dict[str, Any]] = Body(default=
             "assigned_counter": tok.assigned_counter,
             "customer_name": tok.customer_name,
             "service_type": tok.service_type,
+            "completed_at": tok.completed_at,
+            "service_duration_seconds": tok.service_duration_seconds,
         }
     return {"status": "no_active_service", "token_id": None}
+
+
+@app.post("/api/tokens/skip")
+async def api_skip_token(payload: Optional[Dict[str, Any]] = Body(default=None)):
+    """
+    Skips the currently called/serving token for a counter.
+    Payload: { "counter": int }
+    """
+    data = payload or {}
+    counter = data.get("counter")
+    tok = queue_mgr.skip_token(counter=counter)
+    if tok:
+        return {
+            "status": "success",
+            "token_id": tok.token_id,
+            "token_status": tok.status,
+            "assigned_counter": tok.assigned_counter,
+            "customer_name": tok.customer_name,
+            "service_type": tok.service_type,
+        }
+    return {"status": "no_token_to_skip", "token_id": None}
 
 
 # ==============================================================================

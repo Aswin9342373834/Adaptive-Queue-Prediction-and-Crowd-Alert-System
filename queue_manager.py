@@ -140,22 +140,46 @@ class QueueManager:
         }
 
     def get_counters_info(self) -> List[Dict[str, Any]]:
-        """Returns full snapshot of all counters, active status, officer, and live queue count."""
+        """Returns full snapshot of all counters, active status, officer, live queue count, and active token details."""
         queue_counts = self.get_counter_queue_counts()
+        now = time.time()
         result = []
         for c in DEFAULT_COUNTERS_CONFIG:
             cntr_num = c["counter"]
-            # Find current serving token for this counter
-            current_serving = None
+            
+            # Find active SERVING token first, then CALLED token
+            active_tok = None
             for t in self.tokens:
                 if t.assigned_counter == cntr_num and t.status == "SERVING":
-                    current_serving = t.token_id
+                    active_tok = t
                     break
-            if not current_serving:
+            if not active_tok:
                 for t in self.tokens:
                     if t.assigned_counter == cntr_num and t.status == "CALLED":
-                        current_serving = t.token_id
+                        active_tok = t
                         break
+
+            active_details = None
+            if active_tok:
+                elapsed_sec = 0.0
+                if active_tok.service_start_at:
+                    elapsed_sec = max(0.0, now - active_tok.service_start_at)
+                elif active_tok.called_at:
+                    elapsed_sec = max(0.0, now - active_tok.called_at)
+
+                active_details = {
+                    "token_id": active_tok.token_id,
+                    "status": active_tok.status,
+                    "customer_name": active_tok.customer_name,
+                    "mobile_number": active_tok.mobile_number,
+                    "service_type": active_tok.service_type,
+                    "assigned_counter": active_tok.assigned_counter,
+                    "customer_id": active_tok.customer_id,
+                    "called_at": active_tok.called_at,
+                    "service_start_at": active_tok.service_start_at,
+                    "elapsed_seconds": round(elapsed_sec, 1),
+                    "elapsed_str": f"{int(elapsed_sec // 60):02d}:{int(elapsed_sec % 60):02d}",
+                }
 
             result.append({
                 "counter": cntr_num,
@@ -164,9 +188,24 @@ class QueueManager:
                 "services": c["services"],
                 "active": c["active"],
                 "waiting_count": queue_counts.get(cntr_num, 0),
-                "current_serving": current_serving,
+                "current_serving": active_tok.token_id if active_tok else None,
+                "current_status": active_tok.status if active_tok else "IDLE",
+                "active_token": active_details,
             })
         return result
+
+    def skip_token(self, counter: Optional[int] = None) -> Optional[Token]:
+        """
+        Marks the currently CALLED or SERVING token as SKIPPED.
+        """
+        for token in self.tokens:
+            if token.status in ("CALLED", "SERVING") and (counter is None or token.assigned_counter == counter):
+                token.status = "SKIPPED"
+                token.completed_at = time.time()
+                self.last_action_message = f"Skipped Token {token.token_id} at Counter {token.assigned_counter:02d}"
+                print(f"[QUEUE] {self.last_action_message}")
+                return token
+        return None
 
     def generate_token(
         self,

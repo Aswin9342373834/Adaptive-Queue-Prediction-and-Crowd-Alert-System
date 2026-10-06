@@ -2,7 +2,6 @@ import React, { useEffect, useState, useMemo } from 'react';
 import { Link } from 'react-router-dom';
 import {
   UserCheck,
-  PlusCircle,
   Megaphone,
   Play,
   CheckCircle,
@@ -13,11 +12,13 @@ import {
   Loader2,
   SkipForward,
   X,
+  PlusCircle,
+  Sparkles,
 } from 'lucide-react';
 import { useQueue } from '../../context/QueueContext';
 import { useAuth } from '../../context/AuthContext';
 import { StatusBadge } from '../../components/common/StatusBadge';
-import type { WaitingCustomer } from '../../types/queue';
+import type { WaitingCustomer, CounterInfo } from '../../types/queue';
 
 export const StaffDashboardPage: React.FC = () => {
   const {
@@ -26,31 +27,76 @@ export const StaffDashboardPage: React.FC = () => {
     callNext,
     startService,
     completeService,
+    skipToken,
     loadingAction,
   } = useQueue();
   const { user } = useAuth();
 
+  // Modals state
+  const [showCompleteConfirm, setShowCompleteConfirm] = useState(false);
   const [showGenerateModal, setShowGenerateModal] = useState(false);
   const [customerName, setCustomerName] = useState('');
   const [customerPhone, setCustomerPhone] = useState('');
   const [serviceType, setServiceType] = useState('Account Service');
   const [generatedConfirmation, setGeneratedConfirmation] = useState<string | null>(null);
 
-  // Extract counter number from assigned string (e.g., "Counter 03" -> 3)
+  // Live timer tick for active service
+  const [nowTime, setNowTime] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNowTime(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+
+  // Extract counter number from user profile (e.g. "Counter 03" -> 3)
   const counterNum = useMemo(() => {
     const match = user?.counterNumber?.match(/\d+/);
     return match ? parseInt(match[0], 10) : 3;
   }, [user?.counterNumber]);
 
-  const servingToken =
-    telemetry?.serving_token_id !== 'None' ? telemetry?.serving_token_id : null;
-  const currentToken =
-    servingToken || (telemetry?.current_token !== 'None' ? telemetry?.current_token : null);
-  const isServing = Boolean(servingToken);
-  const elapsedStr = telemetry?.serving_elapsed_str ?? '0:00';
-  const remainingStr = telemetry?.serving_remaining_str ?? '0:00';
-  
-  // Filter queue specifically for this counter (or unassigned/all if none specific)
+  // Find this specific counter's live data from telemetry counters
+  const currentCounterInfo = useMemo(() => {
+    const counters: CounterInfo[] = telemetry?.counters ?? [];
+    return counters.find((c) => c.counter === counterNum);
+  }, [telemetry?.counters, counterNum]);
+
+  // Active token for this counter (either from counters info or fallback)
+  const activeToken = useMemo(() => {
+    if (currentCounterInfo?.active_token) {
+      return currentCounterInfo.active_token;
+    }
+    // Fallback if legacy single token matches
+    const servingId = telemetry?.serving_token_id !== 'None' ? telemetry?.serving_token_id : null;
+    const currentId = servingId || (telemetry?.current_token !== 'None' ? telemetry?.current_token : null);
+    if (currentId) {
+      return {
+        token_id: currentId,
+        status: (servingId ? 'SERVING' : 'CALLED') as 'SERVING' | 'CALLED',
+        customer_name: '',
+        service_type: 'General Banking',
+        assigned_counter: counterNum,
+        called_at: 0,
+        service_start_at: servingId ? 0 : undefined,
+      };
+    }
+    return null;
+  }, [currentCounterInfo, telemetry?.serving_token_id, telemetry?.current_token, counterNum]);
+
+  const isCalled = activeToken?.status === 'CALLED';
+  const isServing = activeToken?.status === 'SERVING';
+  const hasActiveCustomer = Boolean(activeToken && (isCalled || isServing));
+
+  // Live elapsed duration calculation
+  const liveElapsedStr = useMemo(() => {
+    if (!activeToken) return '00:00';
+    let startTimestamp = activeToken.service_start_at || (isCalled ? activeToken.called_at : null);
+    if (!startTimestamp) return '00:00';
+    const elapsedSec = Math.max(0, Math.floor(nowTime / 1000 - startTimestamp));
+    const mins = Math.floor(elapsedSec / 60);
+    const secs = elapsedSec % 60;
+    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }, [activeToken, isCalled, nowTime]);
+
+  // Counter-filtered waiting queue
   const waitingQueue = useMemo(() => {
     const allWaiting = telemetry?.waiting_queue ?? [];
     const counterSpecific = allWaiting.filter(
@@ -59,17 +105,13 @@ export const StaffDashboardPage: React.FC = () => {
     return counterSpecific.length > 0 ? counterSpecific : allWaiting;
   }, [telemetry?.waiting_queue, counterNum]);
 
-  // Identify the FIRST customer in the real waiting queue for this counter
+  // Identify the FIRST customer waiting for this counter
   const nextCustomer = waitingQueue.length > 0 ? waitingQueue[0] : null;
 
   // Keyboard shortcut listener for rapid counter operations
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (
-        ['INPUT', 'TEXTAREA', 'SELECT'].includes(
-          (e.target as HTMLElement).tagName
-        )
-      ) {
+      if (['INPUT', 'TEXTAREA', 'SELECT'].includes((e.target as HTMLElement).tagName)) {
         return;
       }
 
@@ -79,25 +121,40 @@ export const StaffDashboardPage: React.FC = () => {
         setShowGenerateModal(true);
       } else if (key === 'C') {
         e.preventDefault();
-        if (nextCustomer) {
+        if (nextCustomer && !hasActiveCustomer) {
           callNext(counterNum);
         }
       } else if (key === 'S') {
         e.preventDefault();
-        if (currentToken && !isServing) {
+        if (isCalled) {
           startService(counterNum);
         }
       } else if (key === 'D') {
         e.preventDefault();
         if (isServing) {
-          completeService(counterNum);
+          setShowCompleteConfirm(true);
         }
       }
     };
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [nextCustomer, currentToken, isServing, counterNum, callNext, startService, completeService]);
+  }, [nextCustomer, hasActiveCustomer, isCalled, isServing, counterNum, callNext, startService]);
+
+  const handleConfirmComplete = async () => {
+    try {
+      await completeService(counterNum);
+      setShowCompleteConfirm(false);
+    } catch {
+      // Feedback handled in QueueContext
+    }
+  };
+
+  const handleSkip = async () => {
+    if (activeToken) {
+      await skipToken(counterNum);
+    }
+  };
 
   const handleCreateToken = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -117,13 +174,9 @@ export const StaffDashboardPage: React.FC = () => {
     }
   };
 
-  const handleSkip = async () => {
-    await callNext(counterNum);
-  };
-
   return (
     <div className="space-y-6 max-w-5xl mx-auto font-sans">
-      {/* Header Banner */}
+      {/* 1. Header Banner */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#E2E8F0] pb-4">
         <div>
           <div className="flex items-center gap-2 mb-1">
@@ -138,20 +191,188 @@ export const StaffDashboardPage: React.FC = () => {
             Staff Counter Dashboard
           </h2>
           <p className="text-xs text-[#64748B] mt-0.5">
-            Call registered customers, manage counter consultations, and record service milestones.
+            Officer: <span className="font-semibold text-[#172033]">{user?.name || 'Sarah Jenkins'}</span> &bull; Follow the structured workflow to serve assigned customers.
           </p>
         </div>
 
         <div className="flex items-center gap-3">
           <StatusBadge level={telemetry?.congestion_level} size="md" />
-          <span className="text-xs font-mono font-bold text-[#64748B] bg-white px-3 py-1.5 rounded-xl border border-[#E2E8F0]">
-            {waitingQueue.length} Assigned Waiting
+          <span className="text-xs font-mono font-bold text-[#64748B] bg-white px-3 py-1.5 rounded-xl border border-[#E2E8F0] shadow-2xs">
+            {waitingQueue.length} In Assigned Queue
           </span>
         </div>
       </div>
 
       {/* ==================================================================== */}
-      {/* 1. TOP ACTION ROW: PROMINENT NEXT CUSTOMER CARD & DESK STATUS CARD */}
+      {/* 2. CURRENT SERVICE CARD (NOW SERVING) */}
+      {/* ==================================================================== */}
+      <div className={`rounded-2xl bg-white border-2 transition-all p-6 sm:p-8 shadow-sm relative overflow-hidden ${
+        isServing
+          ? 'border-[#06B6D4] ring-2 ring-[#E0F2FE]'
+          : isCalled
+          ? 'border-[#F59E0B] ring-2 ring-[#FEF3C7]'
+          : 'border-[#E2E8F0]'
+      }`}>
+        {/* Top Highlight Accent Bar */}
+        <div className={`absolute top-0 left-0 right-0 h-1.5 ${
+          isServing ? 'bg-[#06B6D4]' : isCalled ? 'bg-[#F59E0B]' : 'bg-[#CBD5E1]'
+        }`} />
+
+        {/* Card Header & Status Badge */}
+        <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-4 mb-6">
+          <div className="flex items-center gap-2.5">
+            <span className={`w-3 h-3 rounded-full ${
+              isServing
+                ? 'bg-[#06B6D4] animate-pulse'
+                : isCalled
+                ? 'bg-[#F59E0B] animate-pulse'
+                : 'bg-[#94A3B8]'
+            }`} />
+            <h3 className="text-xs font-black uppercase tracking-wider text-[#172033]">
+              CURRENT SERVICE AT {user?.counterNumber?.toUpperCase() || 'COUNTER 03'}
+            </h3>
+          </div>
+
+          <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider border ${
+            isServing
+              ? 'bg-[#E0F2FE] text-[#0284C7] border-[#BAE6FD]'
+              : isCalled
+              ? 'bg-[#FEF3C7] text-[#D97706] border-[#FDE68A]'
+              : 'bg-[#F8FAFC] text-[#64748B] border-[#E2E8F0]'
+          }`}>
+            {isServing ? 'SERVICE IN PROGRESS' : isCalled ? 'CALLED — AWAITING ARRIVAL' : 'COUNTER READY'}
+          </span>
+        </div>
+
+        {/* Customer Content */}
+        {hasActiveCustomer ? (
+          <div className="space-y-6">
+            <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-center">
+              {/* Token ID and Customer Name (7 Cols) */}
+              <div className="md:col-span-7">
+                <span className="text-xs font-bold uppercase tracking-widest text-[#64748B] block mb-1">
+                  NOW SERVING
+                </span>
+                <div className="text-5xl sm:text-6xl font-black font-mono text-[#172033] tracking-tight">
+                  {activeToken?.token_id}
+                </div>
+                <div className="mt-2 space-y-1">
+                  <div className="text-base font-bold text-[#172033]">
+                    {activeToken?.customer_name || `Customer #${activeToken?.token_id.replace(/\D/g, '') || '01'}`}
+                  </div>
+                  <div className="text-xs text-[#64748B] font-medium flex items-center gap-2">
+                    <span>Service: <strong className="text-[#172033]">{activeToken?.service_type || 'General Banking'}</strong></span>
+                    <span>&bull;</span>
+                    <span>Desk: <strong className="text-[#1769E0] font-mono">{user?.counterNumber || 'Counter 03'}</strong></span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Service Duration Counter (5 Cols) */}
+              <div className="md:col-span-5 bg-[#F8FAFC] p-5 rounded-2xl border border-[#E2E8F0] text-center shadow-2xs">
+                <div className="flex items-center justify-center gap-1.5 text-xs font-bold uppercase tracking-wider text-[#64748B] mb-1.5">
+                  <Clock className="w-4 h-4 text-[#1769E0]" />
+                  <span>Service Duration</span>
+                </div>
+                <div className="text-4xl sm:text-5xl font-black font-mono text-[#172033] tracking-wider">
+                  {liveElapsedStr}
+                </div>
+                <span className="text-[11px] text-[#64748B] mt-1 block font-medium">
+                  {isServing ? 'Live consultation timer' : 'Timer activates upon service start'}
+                </span>
+              </div>
+            </div>
+
+            {/* Workflow Action Buttons Row */}
+            <div className="grid grid-cols-1 sm:grid-cols-12 gap-3 pt-4 border-t border-[#F1F5F9]">
+              {/* START SERVICE BUTTON (Enabled when CALLED, disabled when SERVING) */}
+              <div className="sm:col-span-4">
+                <button
+                  type="button"
+                  onClick={() => startService(counterNum)}
+                  disabled={loadingAction !== null || !isCalled}
+                  className={`w-full flex items-center justify-center gap-2 py-3.5 px-4 rounded-xl font-bold text-xs uppercase tracking-wider transition-all shadow-2xs ${
+                    isCalled
+                      ? 'bg-[#1769E0] hover:bg-[#1558BD] text-white shadow-md cursor-pointer'
+                      : 'bg-[#F1F5F9] text-[#94A3B8] border border-[#E2E8F0] cursor-not-allowed opacity-50'
+                  }`}
+                >
+                  {loadingAction === 'START_SERVICE' ? (
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : (
+                    <Play className="w-4 h-4" />
+                  )}
+                  <span>START SERVICE [S]</span>
+                </button>
+              </div>
+
+              {/* COMPLETE SERVICE BUTTON (Primary Action when IN SERVICE, Confirmation modal trigger) */}
+              <div className="sm:col-span-6">
+                <button
+                  type="button"
+                  onClick={() => setShowCompleteConfirm(true)}
+                  disabled={loadingAction !== null || !isServing}
+                  className={`w-full flex items-center justify-center gap-2.5 py-3.5 px-6 rounded-xl font-black text-sm uppercase tracking-wider transition-all ${
+                    isServing
+                      ? 'bg-[#16A34A] hover:bg-[#15803D] text-white shadow-md hover:shadow-lg active:scale-98 cursor-pointer ring-2 ring-[#86EFAC]'
+                      : 'bg-[#F1F5F9] text-[#94A3B8] border border-[#E2E8F0] cursor-not-allowed opacity-50'
+                  }`}
+                >
+                  {loadingAction === 'COMPLETE_SERVICE' ? (
+                    <Loader2 className="w-5 h-5 animate-spin" />
+                  ) : (
+                    <CheckCircle className="w-5 h-5" />
+                  )}
+                  <span>✓ COMPLETE SERVICE [D]</span>
+                </button>
+              </div>
+
+              {/* SKIP TOKEN BUTTON */}
+              <div className="sm:col-span-2">
+                <button
+                  type="button"
+                  onClick={handleSkip}
+                  disabled={loadingAction !== null}
+                  className="w-full flex items-center justify-center gap-1.5 py-3.5 px-3 rounded-xl bg-[#FEF2F2] hover:bg-[#FEE2E2] border border-[#FECACA] text-[#DC2626] font-bold text-xs uppercase tracking-wider transition-colors cursor-pointer"
+                  title="Mark token as skipped and proceed"
+                >
+                  <SkipForward className="w-4 h-4" />
+                  <span>SKIP</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : (
+          /* Empty / Idle Counter State */
+          <div className="py-8 text-center space-y-3">
+            <div className="w-14 h-14 rounded-2xl bg-[#EFF6FF] border border-[#BFDBFE] flex items-center justify-center text-[#1769E0] mx-auto">
+              <UserCheck className="w-7 h-7" />
+            </div>
+            <div>
+              <h4 className="text-lg font-black text-[#172033] uppercase">
+                COUNTER READY &bull; NO ACTIVE CUSTOMER
+              </h4>
+              <p className="text-xs text-[#64748B] max-w-md mx-auto mt-1">
+                Your counter is idle. Check the <span className="font-bold text-[#1769E0]">NEXT CUSTOMER</span> section below and click <span className="font-bold text-[#1769E0]">CALL NEXT</span> to begin service.
+              </p>
+            </div>
+
+            {/* Disabled Complete button to indicate workflow requirement */}
+            <div className="pt-3 max-w-xs mx-auto">
+              <button
+                type="button"
+                disabled
+                className="w-full py-2.5 px-4 rounded-xl bg-[#F1F5F9] text-[#94A3B8] border border-[#E2E8F0] text-xs font-bold uppercase tracking-wider cursor-not-allowed"
+              >
+                COMPLETE SERVICE (No Active Token)
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* ==================================================================== */}
+      {/* 3. NEXT CUSTOMER CARD & COUNTER STATS */}
       {/* ==================================================================== */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
         {/* PROMINENT NEXT CUSTOMER CARD (8 Columns) */}
@@ -165,17 +386,17 @@ export const StaffDashboardPage: React.FC = () => {
               <div className="flex items-center gap-2">
                 <span className="w-2.5 h-2.5 rounded-full bg-[#1769E0] animate-pulse" />
                 <h3 className="text-xs font-black uppercase tracking-wider text-[#1769E0]">
-                  NEXT CUSTOMER FOR {user?.counterNumber?.toUpperCase() || 'COUNTER 03'}
+                  NEXT CUSTOMER IN LINE
                 </h3>
               </div>
 
               {nextCustomer ? (
                 <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-[#EFF6FF] text-[#1769E0] border border-[#BFDBFE]">
-                  Position #1 in Counter Queue
+                  Position #1 in Queue
                 </span>
               ) : (
                 <span className="px-2.5 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider bg-[#F1F5F9] text-[#64748B] border border-[#E2E8F0]">
-                  No Assigned Queue
+                  Queue Empty
                 </span>
               )}
             </div>
@@ -192,7 +413,7 @@ export const StaffDashboardPage: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="bg-[#F8FAFC] border border-[#E2E8F0] p-3.5 rounded-xl text-xs space-y-1 sm:min-w-[240px]">
+                <div className="bg-[#F8FAFC] border border-[#E2E8F0] p-3.5 rounded-xl text-xs space-y-1.5 sm:min-w-[240px]">
                   <div className="flex items-center justify-between text-[#64748B]">
                     <span>Customer:</span>
                     <strong className="text-[#172033] font-semibold truncate max-w-[140px]">
@@ -209,6 +430,10 @@ export const StaffDashboardPage: React.FC = () => {
                     <span>Waiting:</span>
                     <strong className="text-[#16A34A]">{nextCustomer.estimated_wait || '2 min'}</strong>
                   </div>
+                  <div className="flex items-center justify-between text-[#64748B]">
+                    <span>Counter:</span>
+                    <strong className="text-[#1769E0] font-mono">{user?.counterNumber || 'Counter 03'}</strong>
+                  </div>
                 </div>
               </div>
             ) : (
@@ -218,7 +443,7 @@ export const StaffDashboardPage: React.FC = () => {
                 </div>
                 <h4 className="text-base font-extrabold text-[#172033]">NO CUSTOMERS WAITING FOR THIS COUNTER</h4>
                 <p className="text-xs text-[#64748B] mt-0.5">
-                  Reception desk will assign arriving customers to this counter.
+                  Reception desk will automatically assign new arriving customers.
                 </p>
               </div>
             )}
@@ -228,8 +453,12 @@ export const StaffDashboardPage: React.FC = () => {
           <div className="mt-5 pt-4 border-t border-[#F1F5F9]">
             <button
               onClick={() => callNext(counterNum)}
-              disabled={loadingAction !== null || !nextCustomer}
-              className="w-full flex items-center justify-center gap-3 py-3.5 px-6 rounded-xl bg-[#1769E0] hover:bg-[#1558BD] text-white font-black text-sm uppercase tracking-wider shadow-sm active:scale-98 transition-all disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
+              disabled={loadingAction !== null || !nextCustomer || hasActiveCustomer}
+              className={`w-full flex items-center justify-center gap-3 py-3.5 px-6 rounded-xl font-black text-sm uppercase tracking-wider shadow-sm transition-all ${
+                nextCustomer && !hasActiveCustomer
+                  ? 'bg-[#1769E0] hover:bg-[#1558BD] text-white active:scale-98 cursor-pointer shadow-md'
+                  : 'bg-[#F1F5F9] text-[#94A3B8] border border-[#E2E8F0] cursor-not-allowed opacity-60'
+              }`}
             >
               {loadingAction === 'CALL_NEXT' ? (
                 <Loader2 className="w-5 h-5 animate-spin" />
@@ -237,39 +466,52 @@ export const StaffDashboardPage: React.FC = () => {
                 <Megaphone className="w-5 h-5" />
               )}
               <span>
-                {nextCustomer ? `CALL NEXT [C] (${nextCustomer.token_id})` : 'NO CUSTOMERS WAITING'}
+                {nextCustomer
+                  ? hasActiveCustomer
+                    ? `FINISH CURRENT SERVICE FIRST BEFORE CALLING ${nextCustomer.token_id}`
+                    : `CALL NEXT [C] (${nextCustomer.token_id})`
+                  : 'NO CUSTOMERS WAITING'}
               </span>
             </button>
           </div>
         </div>
 
-        {/* DESK CAPACITY / MANUAL TICKET CARD (4 Columns) */}
+        {/* COUNTER WORKFLOW HELPER & QUICK TICKET (4 Columns) */}
         <div className="lg:col-span-4 rounded-2xl bg-white border border-[#E2E8F0] p-6 shadow-sm flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-3 mb-4">
               <div className="flex items-center gap-2">
-                <UserCheck className="w-4 h-4 text-[#1769E0]" />
+                <Sparkles className="w-4 h-4 text-[#1769E0]" />
                 <h3 className="text-xs font-bold uppercase tracking-wider text-[#172033]">
-                  Counter Desk
+                  Service Workflow
                 </h3>
               </div>
               <span className="text-[10px] font-mono text-[#16A34A] font-bold bg-[#DCFCE7] px-2 py-0.5 rounded-full border border-[#86EFAC]">
-                Online
+                Step Guide
               </span>
             </div>
 
-            <p className="text-xs text-[#64748B] leading-relaxed mb-4">
-              Customers are registered by the Reception Desk and routed to this counter based on service needs.
-            </p>
-
-            <div className="space-y-2 mb-4">
-              <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] flex items-center justify-between text-xs">
-                <span className="text-[#64748B]">Assigned Desk:</span>
-                <strong className="text-[#172033] font-mono">{user?.counterNumber || 'Counter 03'}</strong>
+            {/* Step-by-step guidance */}
+            <div className="space-y-2.5 text-xs mb-4">
+              <div className={`p-2.5 rounded-xl border flex items-center gap-2.5 ${
+                !hasActiveCustomer ? 'bg-[#EFF6FF] border-[#BFDBFE] text-[#1769E0] font-bold' : 'bg-[#F8FAFC] border-[#E2E8F0] text-[#64748B]'
+              }`}>
+                <span className="w-5 h-5 rounded-full bg-white border flex items-center justify-center font-mono text-[10px] shrink-0">1</span>
+                <span>Call Next Customer [C]</span>
               </div>
-              <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] flex items-center justify-between text-xs">
-                <span className="text-[#64748B]">Assigned Queue:</span>
-                <strong className="text-[#1769E0] font-mono font-bold">{waitingQueue.length} Customers</strong>
+
+              <div className={`p-2.5 rounded-xl border flex items-center gap-2.5 ${
+                isCalled ? 'bg-[#FEF3C7] border-[#FDE68A] text-[#D97706] font-bold' : 'bg-[#F8FAFC] border-[#E2E8F0] text-[#64748B]'
+              }`}>
+                <span className="w-5 h-5 rounded-full bg-white border flex items-center justify-center font-mono text-[10px] shrink-0">2</span>
+                <span>Start Service on Arrival [S]</span>
+              </div>
+
+              <div className={`p-2.5 rounded-xl border flex items-center gap-2.5 ${
+                isServing ? 'bg-[#DCFCE7] border-[#86EFAC] text-[#16A34A] font-bold' : 'bg-[#F8FAFC] border-[#E2E8F0] text-[#64748B]'
+              }`}>
+                <span className="w-5 h-5 rounded-full bg-white border flex items-center justify-center font-mono text-[10px] shrink-0">3</span>
+                <span>Complete Service on Finish [D]</span>
               </div>
             </div>
           </div>
@@ -285,120 +527,14 @@ export const StaffDashboardPage: React.FC = () => {
       </div>
 
       {/* ==================================================================== */}
-      {/* 2. CURRENT SERVICE AT THIS COUNTER SECTION */}
-      {/* ==================================================================== */}
-      <div className="rounded-2xl bg-white border border-[#E2E8F0] p-6 sm:p-8 shadow-sm relative overflow-hidden">
-        <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-4 mb-6">
-          <div className="flex items-center gap-2.5">
-            <span
-              className={`w-3 h-3 rounded-full ${
-                isServing
-                  ? 'bg-[#16A34A] animate-pulse'
-                  : currentToken
-                  ? 'bg-[#D97706] animate-pulse'
-                  : 'bg-[#CBD5E1]'
-              }`}
-            />
-            <span className="text-xs font-bold uppercase tracking-wider text-[#64748B]">
-              CURRENT TOKEN AT {user?.counterNumber?.toUpperCase() || 'COUNTER 03'}
-            </span>
-          </div>
-
-          <span
-            className={`px-3 py-1 rounded-full text-xs font-bold font-mono uppercase tracking-wider border ${
-              isServing
-                ? 'bg-[#DCFCE7] text-[#16A34A] border-[#86EFAC]'
-                : currentToken
-                ? 'bg-[#FEF3C7] text-[#D97706] border-[#FDE68A]'
-                : 'bg-[#F1F5F9] text-[#64748B] border-[#E2E8F0]'
-            }`}
-          >
-            {isServing ? 'NOW SERVING' : currentToken ? 'CALLED — AWAITING ARRIVAL' : 'COUNTER IDLE'}
-          </span>
-        </div>
-
-        {/* Current Serving Details & Duration */}
-        <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-center my-2">
-          {/* Token Display (7 Cols) */}
-          <div className="md:col-span-7 text-center md:text-left">
-            <span className="text-xs font-bold text-[#64748B] uppercase tracking-widest block mb-1">
-              Active Customer
-            </span>
-            <div className="text-5xl sm:text-6xl font-black font-mono text-[#172033] tracking-tight">
-              {currentToken || 'Counter Idle'}
-            </div>
-            <p className="text-xs sm:text-sm font-semibold text-[#64748B] mt-2">
-              {isServing
-                ? 'Service session is actively running.'
-                : currentToken
-                ? 'Customer called. Click "Start Service" when customer arrives at counter.'
-                : 'Click "Call Next" when ready to serve the next customer in line.'}
-            </p>
-          </div>
-
-          {/* Service Duration Timer (5 Cols) */}
-          <div className="md:col-span-5 bg-[#F8FAFC] p-5 rounded-xl border border-[#E2E8F0] text-center">
-            <div className="flex items-center justify-center gap-1.5 text-xs font-bold uppercase tracking-wider text-[#64748B] mb-2">
-              <Clock className="w-4 h-4 text-[#1769E0]" />
-              <span>Service Duration</span>
-            </div>
-            <div className="text-4xl sm:text-5xl font-black font-mono text-[#172033] tracking-wider">
-              {isServing ? elapsedStr : '0:00'}
-            </div>
-            <span className="text-[11px] text-[#64748B] mt-1 block font-medium">
-              {isServing ? `Estimated Remaining: ~${remainingStr}` : 'Timer activates upon service start'}
-            </span>
-          </div>
-        </div>
-
-        {/* Counter Action Buttons */}
-        <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mt-6 pt-6 border-t border-[#F1F5F9]">
-          <button
-            onClick={() => startService(counterNum)}
-            disabled={loadingAction !== null || !currentToken || isServing}
-            className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-[#EFF6FF] hover:bg-[#DBEAFE] border border-[#BFDBFE] text-[#1769E0] font-bold text-xs uppercase tracking-wider shadow-2xs active:scale-98 transition-all disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
-          >
-            {loadingAction === 'START_SERVICE' ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <Play className="w-4 h-4" />
-            )}
-            <span>START SERVICE [S]</span>
-          </button>
-
-          <button
-            onClick={() => completeService(counterNum)}
-            disabled={loadingAction !== null || !isServing}
-            className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-[#16A34A] hover:bg-[#15803D] text-white font-bold text-xs uppercase tracking-wider shadow-2xs active:scale-98 transition-all disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
-          >
-            {loadingAction === 'COMPLETE_SERVICE' ? (
-              <Loader2 className="w-4 h-4 animate-spin" />
-            ) : (
-              <CheckCircle className="w-4 h-4" />
-            )}
-            <span>COMPLETE SERVICE [D]</span>
-          </button>
-
-          <button
-            onClick={handleSkip}
-            disabled={loadingAction !== null || !currentToken}
-            className="flex items-center justify-center gap-2 py-3 px-4 rounded-xl bg-[#FEF3C7] hover:bg-[#FDE68A] border border-[#FDE68A] text-[#D97706] font-bold text-xs uppercase tracking-wider shadow-2xs active:scale-98 transition-all disabled:opacity-40 disabled:pointer-events-none cursor-pointer"
-          >
-            <SkipForward className="w-4 h-4" />
-            <span>SKIP TOKEN</span>
-          </button>
-        </div>
-      </div>
-
-      {/* ==================================================================== */}
-      {/* 3. WAITING CUSTOMERS IN QUEUE TABLE (WITH FIRST ROW HIGHLIGHTED) */}
+      {/* 4. WAITING CUSTOMERS IN QUEUE TABLE */}
       {/* ==================================================================== */}
       <div className="rounded-2xl bg-white border border-[#E2E8F0] p-6 shadow-sm">
         <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-3 mb-4">
           <div className="flex items-center gap-2">
             <ListOrdered className="w-4 h-4 text-[#1769E0]" />
             <h3 className="text-sm font-bold text-[#172033] uppercase tracking-wider">
-              Waiting Customers for {user?.counterNumber || 'Counter 03'}
+              Assigned Queue for {user?.counterNumber || 'Counter 03'}
             </h3>
           </div>
 
@@ -484,14 +620,11 @@ export const StaffDashboardPage: React.FC = () => {
         )}
       </div>
 
-      {/* Keyboard Shortcuts Helper Footer */}
+      {/* 5. Keyboard Shortcuts Helper Footer */}
       <div className="p-4 rounded-xl bg-white border border-[#E2E8F0] flex flex-wrap items-center justify-between gap-3 text-xs text-[#64748B]">
         <span className="font-bold text-[#172033]">Keyboard Shortcuts:</span>
         <div className="flex flex-wrap items-center gap-2 font-mono text-[11px]">
           <span className="bg-[#EFF6FF] px-2 py-0.5 rounded border border-[#BFDBFE] text-[#1769E0] font-bold">
-            [N] New Token
-          </span>
-          <span className="bg-[#FEF3C7] px-2 py-0.5 rounded border border-[#FDE68A] text-[#D97706] font-bold">
             [C] Call Next
           </span>
           <span className="bg-[#EFF6FF] px-2 py-0.5 rounded border border-[#BFDBFE] text-[#1769E0] font-bold">
@@ -500,11 +633,90 @@ export const StaffDashboardPage: React.FC = () => {
           <span className="bg-[#DCFCE7] px-2 py-0.5 rounded border border-[#86EFAC] text-[#16A34A] font-bold">
             [D] Complete Service
           </span>
+          <span className="bg-[#F8FAFC] px-2 py-0.5 rounded border border-[#CBD5E1] text-[#64748B] font-bold">
+            [N] Manual Token
+          </span>
         </div>
       </div>
 
       {/* ==================================================================== */}
-      {/* 4. TOKEN GENERATION MODAL / FORM */}
+      {/* 6. COMPLETE SERVICE CONFIRMATION DIALOG */}
+      {/* ==================================================================== */}
+      {showCompleteConfirm && activeToken && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-3xl border border-[#BFDBFE] shadow-2xl max-w-md w-full p-6 sm:p-8 relative text-center space-y-6">
+            {/* Header Icon */}
+            <div className="w-14 h-14 rounded-2xl bg-[#DCFCE7] border border-[#86EFAC] text-[#16A34A] flex items-center justify-center mx-auto shadow-2xs">
+              <CheckCircle className="w-7 h-7" />
+            </div>
+
+            <div>
+              <h3 className="text-xl font-black text-[#172033] tracking-tight">
+                Complete this customer's service?
+              </h3>
+              <p className="text-xs text-[#64748B] mt-1">
+                This will finalize the consultation, log the service duration, and make your counter ready for the next customer.
+              </p>
+            </div>
+
+            {/* Consultation Summary */}
+            <div className="rounded-2xl bg-[#F8FAFC] border border-[#E2E8F0] p-4 text-xs space-y-2.5 text-left">
+              <div className="flex justify-between items-center">
+                <span className="text-[#64748B] font-medium">Customer:</span>
+                <strong className="text-[#172033] text-sm">
+                  {activeToken.customer_name || `Customer #${activeToken.token_id.replace(/\D/g, '') || '01'}`}
+                </strong>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-[#64748B] font-medium">Token ID:</span>
+                <strong className="text-[#1769E0] font-mono text-base">{activeToken.token_id}</strong>
+              </div>
+              <div className="flex justify-between items-center">
+                <span className="text-[#64748B] font-medium">Service:</span>
+                <strong className="text-[#172033]">{activeToken.service_type || 'Account Opening'}</strong>
+              </div>
+              <div className="flex justify-between items-center border-t border-[#E2E8F0] pt-2">
+                <span className="text-[#64748B] font-medium">Recorded Duration:</span>
+                <strong className="text-[#16A34A] font-mono">{liveElapsedStr}</strong>
+              </div>
+            </div>
+
+            {/* Modal Actions */}
+            <div className="grid grid-cols-2 gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setShowCompleteConfirm(false)}
+                disabled={loadingAction === 'COMPLETE_SERVICE'}
+                className="py-3 px-4 rounded-xl bg-[#F8FAFC] hover:bg-[#F1F5F9] border border-[#CBD5E1] text-xs font-bold text-[#64748B] transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                onClick={handleConfirmComplete}
+                disabled={loadingAction === 'COMPLETE_SERVICE'}
+                className="py-3 px-4 rounded-xl bg-[#16A34A] hover:bg-[#15803D] text-white font-bold text-xs uppercase tracking-wider shadow-md transition-all flex items-center justify-center gap-2 cursor-pointer disabled:opacity-50"
+              >
+                {loadingAction === 'COMPLETE_SERVICE' ? (
+                  <>
+                    <Loader2 className="w-4 h-4 animate-spin" />
+                    <span>Completing...</span>
+                  </>
+                ) : (
+                  <>
+                    <CheckCircle className="w-4 h-4" />
+                    <span>Complete Service</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================================== */}
+      {/* 7. MANUAL TOKEN GENERATION MODAL */}
       {/* ==================================================================== */}
       {showGenerateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/40 backdrop-blur-xs">
@@ -512,7 +724,7 @@ export const StaffDashboardPage: React.FC = () => {
             <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-3 mb-4">
               <div className="flex items-center gap-2">
                 <PlusCircle className="w-5 h-5 text-[#1769E0]" />
-                <h3 className="text-base font-bold text-[#172033]">Generate Customer Token</h3>
+                <h3 className="text-base font-bold text-[#172033]">Manual Walk-in Ticket</h3>
               </div>
               <button
                 onClick={() => {
@@ -534,7 +746,7 @@ export const StaffDashboardPage: React.FC = () => {
                   {generatedConfirmation}
                 </div>
                 <p className="text-xs text-[#64748B] mb-6 font-medium">
-                  Please wait for your token to be called on the display screen.
+                  Assigned to {user?.counterNumber || 'Counter 03'}.
                 </p>
                 <button
                   onClick={() => {
@@ -583,10 +795,12 @@ export const StaffDashboardPage: React.FC = () => {
                     onChange={(e) => setServiceType(e.target.value)}
                     className="w-full px-3.5 py-2.5 rounded-xl bg-[#F8FAFC] border border-[#CBD5E1] text-sm text-[#172033] focus:outline-none focus:border-[#1769E0]"
                   >
-                    <option value="Account Service">Account Service & Openings</option>
-                    <option value="Cash Deposit">Cash Deposit & Withdrawal</option>
-                    <option value="Priority Assistance">Priority / Senior Citizens</option>
-                    <option value="Loans & Advisory">Loans & Advisory</option>
+                    <option value="Account Service">Account Service & Maintenance</option>
+                    <option value="Account Opening">New Account Opening</option>
+                    <option value="Cash Deposit">Cash Deposit</option>
+                    <option value="Cash Withdrawal">Cash Withdrawal</option>
+                    <option value="Loan Enquiry">Loans & Advisory</option>
+                    <option value="General Banking">General Banking</option>
                   </select>
                 </div>
 
@@ -603,7 +817,7 @@ export const StaffDashboardPage: React.FC = () => {
                     disabled={loadingAction === 'GENERATE'}
                     className="px-5 py-2.5 rounded-xl bg-[#1769E0] hover:bg-[#1558BD] text-white font-bold text-xs uppercase tracking-wider shadow-2xs cursor-pointer disabled:opacity-50"
                   >
-                    {loadingAction === 'GENERATE' ? 'Generating...' : 'Issue Token'}
+                    {loadingAction === 'GENERATE' ? 'Issuing...' : 'Issue Token'}
                   </button>
                 </div>
               </form>

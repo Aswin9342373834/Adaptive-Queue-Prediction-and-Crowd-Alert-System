@@ -75,6 +75,23 @@ export const api = {
     return res.json();
   },
 
+  async skipToken(counter?: number): Promise<{
+    status: string;
+    token_id: string | null;
+    token_status?: string;
+    assigned_counter?: number;
+    customer_name?: string;
+    service_type?: string;
+  }> {
+    const res = await fetch(`${API_BASE_URL}/api/tokens/skip`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(counter ? { counter } : {}),
+    });
+    if (!res.ok) throw new Error('Failed to skip token');
+    return res.json();
+  },
+
   async getCounters(): Promise<{ counters: CounterInfo[] }> {
     const res = await fetch(`${API_BASE_URL}/api/counters`);
     if (!res.ok) throw new Error('Failed to fetch counters');

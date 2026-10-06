@@ -14,6 +14,20 @@ export interface WaitingCustomer {
   created_at?: number;
 }
 
+export interface ActiveCounterToken {
+  token_id: string;
+  status: string;
+  customer_name?: string;
+  mobile_number?: string;
+  service_type?: string;
+  assigned_counter?: number;
+  customer_id?: string;
+  called_at?: number;
+  service_start_at?: number;
+  elapsed_seconds?: number;
+  elapsed_str?: string;
+}
+
 export interface CounterInfo {
   counter: number;
   name: string;
@@ -22,6 +36,8 @@ export interface CounterInfo {
   active: boolean;
   waiting_count: number;
   current_serving: string | null;
+  current_status?: string;
+  active_token?: ActiveCounterToken | null;
 }
 
 export interface CounterRecommendation {

@@ -15,6 +15,7 @@ interface QueueContextType {
   callNext: (counter?: number) => Promise<any>;
   startService: (counter?: number) => Promise<any>;
   completeService: (counter?: number) => Promise<any>;
+  skipToken: (counter?: number) => Promise<any>;
   testHardware: (level: string) => Promise<any>;
   addAnnouncement: (text: string) => void;
   removeAnnouncement: (index: number) => void;
@@ -35,7 +36,7 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   const [loadingAction, setLoadingAction] = useState<string | null>(null);
   const [announcements, setAnnouncements] = useState<string[]>(DEFAULT_ANNOUNCEMENTS);
 
-  const showFeedback = (msg: string, duration = 3000) => {
+  const showFeedback = (msg: string, duration = 3500) => {
     setLastFeedback(msg);
     setTimeout(() => {
       setLastFeedback(null);
@@ -83,7 +84,7 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setLoadingAction('START_SERVICE');
       const res = await api.startService(counter);
       if (res.token_id) {
-        showFeedback(`Started Service: ${res.token_id}`);
+        showFeedback(`Service Started: ${res.token_id}`);
       } else {
         showFeedback('No token ready for service');
       }
@@ -101,13 +102,31 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       setLoadingAction('COMPLETE_SERVICE');
       const res = await api.completeService(counter);
       if (res.token_id) {
-        showFeedback(`Completed Service: ${res.token_id}`);
+        showFeedback(`✓ Service completed successfully for ${res.token_id}`);
       } else {
         showFeedback('No active service to complete');
       }
       return res;
     } catch (err: any) {
-      showFeedback(`Failed to complete service: ${err.message || 'Error'}`);
+      showFeedback(`Unable to complete service. Please try again.`);
+      throw err;
+    } finally {
+      setLoadingAction(null);
+    }
+  }, []);
+
+  const skipToken = useCallback(async (counter?: number) => {
+    try {
+      setLoadingAction('SKIP_TOKEN');
+      const res = await api.skipToken(counter);
+      if (res.token_id) {
+        showFeedback(`Skipped token ${res.token_id}`);
+      } else {
+        showFeedback('No token to skip');
+      }
+      return res;
+    } catch (err: any) {
+      showFeedback(`Failed to skip token: ${err.message || 'Error'}`);
       throw err;
     } finally {
       setLoadingAction(null);
@@ -153,6 +172,7 @@ export const QueueProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         callNext,
         startService,
         completeService,
+        skipToken,
         testHardware,
         addAnnouncement,
         removeAnnouncement,
