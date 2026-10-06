@@ -1,7 +1,7 @@
 """
 Queue Analytics Module.
-Calculates real-time queue growth, arrival rates, service completion rates,
-and predicts forward congestion horizons based on live stream data.
+Calculates real-time crowd analytics, queue growth, arrival rates, service completion rates,
+peak and rolling history, and predicts forward congestion horizons based on live stream data.
 """
 
 from collections import deque
@@ -26,10 +26,38 @@ class QueueAnalytics:
         self.prediction_horizon = float(prediction_horizon)
         self.session_start_time = time.time()
         self.history: deque = deque(maxlen=max_history)
+        self.crowd_chart_history: deque = deque(maxlen=60)  # rolling 60 points for chart
+
+        # Configurable crowd thresholds
+        self.threshold_normal_max: int = getattr(config, "CROWD_THRESHOLD_NORMAL_MAX", 15)
+        self.threshold_moderate_max: int = getattr(config, "CROWD_THRESHOLD_MODERATE_MAX", 30)
 
         # Unique person arrival tracking (track_id -> first arrival timestamp)
         self.seen_waiting_track_ids: Dict[int, float] = {}
         self.arrivals_in_window: List[float] = []
+
+        # Peak and average tracking
+        self.peak_crowd_count: int = 0
+        self.total_people_samples: int = 0
+        self.sum_people_samples: int = 0
+        self.entering_count: int = 0
+        self.leaving_count: int = 0
+        self.prev_detected_count: int = 0
+        self.last_chart_update_time: float = 0.0
+
+    def set_thresholds(self, normal_max: int, moderate_max: int) -> None:
+        """Dynamically updates crowd thresholds from backend API."""
+        self.threshold_normal_max = max(1, normal_max)
+        self.threshold_moderate_max = max(self.threshold_normal_max + 1, moderate_max)
+
+    def get_crowd_status(self, people_count: int) -> str:
+        """Determines crowd status strictly from real detected count."""
+        if people_count <= self.threshold_normal_max:
+            return "NORMAL"
+        elif people_count <= self.threshold_moderate_max:
+            return "MODERATE"
+        else:
+            return "HIGH"
 
     def update(
         self,
@@ -37,6 +65,7 @@ class QueueAnalytics:
         evaluated_tracks: List[Dict[str, Any]],
         queue_manager: QueueManager,
         wait_estimates: Dict[str, Any],
+        total_people_detected: int = 0,
         current_time: Optional[float] = None,
     ) -> Dict[str, Any]:
         """
@@ -45,6 +74,25 @@ class QueueAnalytics:
         now = current_time if current_time is not None else time.time()
         tokens_waiting_count = len(queue_manager.get_waiting_tokens())
         effective_waiting_load = max(waiting_people_count, tokens_waiting_count)
+
+        # Update peak and average crowd
+        if total_people_detected > self.peak_crowd_count:
+            self.peak_crowd_count = total_people_detected
+        
+        self.total_people_samples += 1
+        self.sum_people_samples += total_people_detected
+        avg_crowd = self.sum_people_samples / max(1, self.total_people_samples)
+
+        # Estimate entering / leaving trends
+        delta_people = total_people_detected - self.prev_detected_count
+        if delta_people > 0:
+            self.entering_count += delta_people
+        elif delta_people < 0:
+            self.leaving_count += abs(delta_people)
+        self.prev_detected_count = total_people_detected
+
+        # Compute crowd status from actual count
+        crowd_status = self.get_crowd_status(total_people_detected)
 
         # ======================================================================
         # 1. Arrival Rate Tracking (Unique persons entering Waiting Area)
@@ -74,14 +122,11 @@ class QueueAnalytics:
         completed_count = len(completed_durations)
         elapsed_session_min = max(0.1, elapsed_session_sec / 60.0)
 
-        # Empirical service rate (completed services / elapsed session minutes)
         empirical_service_rate_per_min = completed_count / elapsed_session_min
 
-        # Expected service rate based on current average service time
         avg_service_sec = wait_estimates.get("avg_service_time_seconds", config.BOOTSTRAP_SERVICE_TIME_SECONDS)
         expected_service_rate_per_min = (60.0 / avg_service_sec) if avg_service_sec > 0 else 0.0
 
-        # Effective service rate displayed
         display_service_rate = (
             empirical_service_rate_per_min if completed_count > 0 else expected_service_rate_per_min
         )
@@ -92,7 +137,6 @@ class QueueAnalytics:
         past_load = effective_waiting_load
         target_past_time = now - self.analysis_window
 
-        # Find historical entry closest to target_past_time
         for h in self.history:
             if h["timestamp"] >= target_past_time:
                 past_load = h["effective_load"]
@@ -113,11 +157,11 @@ class QueueAnalytics:
         # ======================================================================
         # 4. Congestion Level Classification
         # ======================================================================
-        if effective_waiting_load >= config.CONGESTION_CRITICAL_THRESHOLD:
-            congestion_level = "CRITICAL"
+        if effective_waiting_load >= config.CONGESTION_CRITICAL_THRESHOLD or crowd_status == "HIGH":
+            congestion_level = "CRITICAL" if effective_waiting_load >= config.CONGESTION_CRITICAL_THRESHOLD else "HIGH"
         elif effective_waiting_load >= config.CONGESTION_HIGH_THRESHOLD:
             congestion_level = "HIGH"
-        elif effective_waiting_load >= config.CONGESTION_MODERATE_THRESHOLD:
+        elif effective_waiting_load >= config.CONGESTION_MODERATE_THRESHOLD or crowd_status == "MODERATE":
             congestion_level = "MODERATE"
         else:
             congestion_level = "NORMAL"
@@ -142,17 +186,46 @@ class QueueAnalytics:
         waiting_estimates = wait_estimates.get("waiting_estimates", [])
         max_wait_seconds = max([w["wait_seconds"] for w in waiting_estimates], default=0.0)
         max_wait_minutes = max_wait_seconds / 60.0
-
         is_long_wait = (max_wait_minutes >= config.MAX_WAIT_ALERT_MINUTES)
 
         # ======================================================================
-        # 7. Record Telemetry in History
+        # 7. Queue + Camera Correlation
+        # ======================================================================
+        active_serving_counters = sum(
+            1 for c in queue_manager.get_counters_info() if c.get("current_status") == "SERVING"
+        )
+        other_area_est = max(0, total_people_detected - waiting_people_count - active_serving_counters)
+
+        # ======================================================================
+        # 8. Rolling Crowd Trend (Recorded every 1-2 seconds for charts)
+        # ======================================================================
+        if now - self.last_chart_update_time >= 1.0:
+            self.last_chart_update_time = now
+            t_label = time.strftime("%H:%M:%S", time.localtime(now))
+            self.crowd_chart_history.append({
+                "time": t_label,
+                "timestamp": now,
+                "count": total_people_detected,
+                "waiting": waiting_people_count,
+                "status": crowd_status,
+            })
+
+        # ======================================================================
+        # 9. Record Telemetry in History
         # ======================================================================
         telemetry_entry = {
             "timestamp": now,
+            "people_detected": total_people_detected,
             "waiting_people": waiting_people_count,
             "tokens_waiting": tokens_waiting_count,
             "effective_load": effective_waiting_load,
+            "crowd_status": crowd_status,
+            "peak_crowd": self.peak_crowd_count,
+            "avg_crowd": round(avg_crowd, 1),
+            "people_entering": self.entering_count,
+            "people_leaving": self.leaving_count,
+            "in_service_count": active_serving_counters,
+            "other_area_estimated": other_area_est,
             "arrival_rate": arrival_rate_per_min,
             "service_rate": display_service_rate,
             "growth_rate": growth_rate_per_min,
@@ -161,6 +234,11 @@ class QueueAnalytics:
             "predicted_alert": predicted_alert,
             "max_wait_minutes": max_wait_minutes,
             "is_long_wait": is_long_wait,
+            "chart_history": list(self.crowd_chart_history),
+            "thresholds": {
+                "normal_max": self.threshold_normal_max,
+                "moderate_max": self.threshold_moderate_max,
+            }
         }
         self.history.append(telemetry_entry)
 

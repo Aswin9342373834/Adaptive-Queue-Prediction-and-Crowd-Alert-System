@@ -1,4 +1,9 @@
-import type { GenerateTokenPayload, CounterInfo, CounterRecommendation } from '../types/queue';
+import type {
+  GenerateTokenPayload,
+  CounterInfo,
+  CounterRecommendation,
+  ReportSummaryResponse,
+} from '../types/queue';
 
 const API_BASE_URL = 'http://localhost:8000';
 
@@ -104,10 +109,16 @@ export const api = {
     return res.json();
   },
 
-  // Queries
+  // Diagnostics & Status
   async getStatus() {
     const res = await fetch(`${API_BASE_URL}/api/status`);
     if (!res.ok) throw new Error('Failed to fetch status');
+    return res.json();
+  },
+
+  async getCrowdStatus() {
+    const res = await fetch(`${API_BASE_URL}/api/crowd/status`);
+    if (!res.ok) throw new Error('Failed to fetch crowd status');
     return res.json();
   },
 
@@ -148,6 +159,34 @@ export const api = {
       body: JSON.stringify({ level }),
     });
     if (!res.ok) throw new Error('Failed to dispatch hardware test');
+    return res.json();
+  },
+
+  // Audit Reports & Export
+  async getReportSummary(period: string = 'today'): Promise<ReportSummaryResponse> {
+    const res = await fetch(`${API_BASE_URL}/api/reports/summary?period=${encodeURIComponent(period)}`);
+    if (!res.ok) throw new Error('Failed to fetch report summary');
+    return res.json();
+  },
+
+  getExportReportUrl(period: string = 'today', format: string = 'csv'): string {
+    return `${API_BASE_URL}/api/reports/export?format=${encodeURIComponent(format)}&period=${encodeURIComponent(period)}`;
+  },
+
+  // Thresholds
+  async getThresholds(): Promise<{ normal_max: number; moderate_max: number; high_min: number }> {
+    const res = await fetch(`${API_BASE_URL}/api/config/thresholds`);
+    if (!res.ok) throw new Error('Failed to fetch thresholds');
+    return res.json();
+  },
+
+  async setThresholds(normalMax: number, moderateMax: number): Promise<{ normal_max: number; moderate_max: number; high_min: number }> {
+    const res = await fetch(`${API_BASE_URL}/api/config/thresholds`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ normal_max: normalMax, moderate_max: moderateMax }),
+    });
+    if (!res.ok) throw new Error('Failed to update thresholds');
     return res.json();
   },
 

@@ -9,6 +9,11 @@ from typing import List, Dict, Optional, Tuple, Any
 import time
 import config
 
+try:
+    from database import db
+except Exception:
+    db = None
+
 
 @dataclass
 class Token:
@@ -202,6 +207,14 @@ class QueueManager:
             if token.status in ("CALLED", "SERVING") and (counter is None or token.assigned_counter == counter):
                 token.status = "SKIPPED"
                 token.completed_at = time.time()
+                if db:
+                    db.record_queue_event(
+                        token_id=token.token_id,
+                        event_type="SKIPPED",
+                        counter=token.assigned_counter,
+                        customer_name=token.customer_name,
+                        service_type=token.service_type,
+                    )
                 self.last_action_message = f"Skipped Token {token.token_id} at Counter {token.assigned_counter:02d}"
                 print(f"[QUEUE] {self.last_action_message}")
                 return token
@@ -237,6 +250,14 @@ class QueueManager:
             customer_id=customer_id.strip(),
         )
         self.tokens.append(new_token)
+        if db:
+            db.record_queue_event(
+                token_id=new_token.token_id,
+                event_type="GENERATED",
+                counter=new_token.assigned_counter,
+                customer_name=new_token.customer_name,
+                service_type=new_token.service_type,
+            )
         name_str = f" ({customer_name})" if customer_name else ""
         self.last_action_message = f"Generated Token {token_id}{name_str} -> Counter {assigned_counter:02d}"
         print(f"[QUEUE] {self.last_action_message}")
@@ -253,6 +274,14 @@ class QueueManager:
                 if token.status == "WAITING" and token.assigned_counter == counter:
                     token.status = "CALLED"
                     token.called_at = time.time()
+                    if db:
+                        db.record_queue_event(
+                            token_id=token.token_id,
+                            event_type="CALLED",
+                            counter=token.assigned_counter,
+                            customer_name=token.customer_name,
+                            service_type=token.service_type,
+                        )
                     self.last_action_message = f"Counter {counter:02d} called Token {token.token_id}"
                     print(f"[QUEUE] {self.last_action_message}")
                     return token
@@ -263,6 +292,14 @@ class QueueManager:
                 if token.status == "WAITING":
                     token.status = "CALLED"
                     token.called_at = time.time()
+                    if db:
+                        db.record_queue_event(
+                            token_id=token.token_id,
+                            event_type="CALLED",
+                            counter=token.assigned_counter,
+                            customer_name=token.customer_name,
+                            service_type=token.service_type,
+                        )
                     self.last_action_message = f"Called Token {token.token_id}"
                     print(f"[QUEUE] {self.last_action_message}")
                     return token
@@ -282,6 +319,15 @@ class QueueManager:
                 if counter is None or token.assigned_counter == counter:
                     token.status = "SERVING"
                     token.service_start_at = time.time()
+                    if db:
+                        db.record_queue_event(
+                            token_id=token.token_id,
+                            event_type="SERVING",
+                            counter=token.assigned_counter,
+                            customer_name=token.customer_name,
+                            service_type=token.service_type,
+                            waiting_duration_seconds=token.wait_duration_seconds,
+                        )
                     self.last_action_message = f"Serving Token {token.token_id} at Counter {token.assigned_counter:02d}"
                     print(f"[QUEUE] {self.last_action_message}")
                     return token
@@ -293,6 +339,15 @@ class QueueManager:
                     token.status = "SERVING"
                     token.called_at = time.time()
                     token.service_start_at = time.time()
+                    if db:
+                        db.record_queue_event(
+                            token_id=token.token_id,
+                            event_type="SERVING",
+                            counter=token.assigned_counter,
+                            customer_name=token.customer_name,
+                            service_type=token.service_type,
+                            waiting_duration_seconds=token.wait_duration_seconds,
+                        )
                     self.last_action_message = f"Directly Serving Token {token.token_id} at Counter {token.assigned_counter:02d}"
                     print(f"[QUEUE] {self.last_action_message}")
                     return token
@@ -312,6 +367,16 @@ class QueueManager:
                     token.status = "COMPLETED"
                     token.completed_at = time.time()
                     dur = token.service_duration_seconds
+                    if db:
+                        db.record_queue_event(
+                            token_id=token.token_id,
+                            event_type="COMPLETED",
+                            counter=token.assigned_counter,
+                            customer_name=token.customer_name,
+                            service_type=token.service_type,
+                            service_duration_seconds=dur,
+                            waiting_duration_seconds=token.wait_duration_seconds,
+                        )
                     self.last_action_message = f"Completed Token {token.token_id} at Counter {token.assigned_counter:02d} (Service: {dur:.1f}s)"
                     print(f"[QUEUE] {self.last_action_message}")
                     return token
@@ -323,6 +388,16 @@ class QueueManager:
                     token.status = "COMPLETED"
                     token.completed_at = time.time()
                     dur = token.service_duration_seconds
+                    if db:
+                        db.record_queue_event(
+                            token_id=token.token_id,
+                            event_type="COMPLETED",
+                            counter=token.assigned_counter,
+                            customer_name=token.customer_name,
+                            service_type=token.service_type,
+                            service_duration_seconds=dur,
+                            waiting_duration_seconds=token.wait_duration_seconds,
+                        )
                     self.last_action_message = f"Completed Token {token.token_id} at Counter {token.assigned_counter:02d} (from CALLED, Service: {dur:.1f}s)"
                     print(f"[QUEUE] {self.last_action_message}")
                     return token

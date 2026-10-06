@@ -1,7 +1,8 @@
 """
 FastAPI Real-Time Backend for Adaptive Queue Prediction & Crowd Alert System.
-Integrates computer vision pipeline, token queue, wait-time estimation, telemetry analytics,
-ESP32 physical hardware alert client, and real-time WebSocket broadcasting with live MJPEG camera feed.
+Integrates computer vision pipeline (YOLO & ByteTrack), token queue engine, wait-time estimation,
+real-time crowd analytics, ESP32 physical hardware client & endpoints,
+SQLite persistence, downloadable audit reports, and real-time WebSocket broadcasting with MJPEG stream.
 """
 
 import asyncio
@@ -10,17 +11,17 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
-# Ensure project root is in sys.path so root modules (config, camera, tracker, etc.) and backend package resolve
+# Ensure project root is in sys.path so root modules resolve
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import cv2
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, PlainTextResponse
 
 import config
 from camera import CameraStream
@@ -32,16 +33,17 @@ from analytics import QueueAnalytics
 from alerts import AlertManager
 from hardware_client import HardwareClient
 from ui_overlay import UIOverlay
+from database import db
 from backend.websocket_manager import WebSocketManager
 
 
 app = FastAPI(
-    title="PS 37 - Adaptive Queue Prediction & ESP32 Hardware API",
-    description="Real-time backend API, WebSocket server, and ESP32 physical hardware controller",
-    version="1.0.0",
+    title="Smart Bank - Adaptive Queue Prediction & Crowd Alert API",
+    description="Real-time banking queue management, computer vision crowd monitor, ESP32 hardware gateway, and audit reporting engine",
+    version="2.0.0",
 )
 
-# Enable CORS for React dashboard
+# Enable CORS for React frontend dashboards
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -78,12 +80,14 @@ hardware_client = HardwareClient(
 overlay = UIOverlay()
 ws_manager = WebSocketManager()
 
-# Global State & Thread Synchronization
+# Global State & Synchronization
 pipeline_thread: Optional[threading.Thread] = None
 pipeline_running = False
 latest_frame_lock = threading.Lock()
 latest_jpeg_bytes: Optional[bytes] = None
 latest_telemetry: Dict[str, Any] = {}
+last_detection_timestamp: float = 0.0
+last_db_snapshot_time: float = 0.0
 app_start_time = time.time()
 async_loop: Optional[asyncio.AbstractEventLoop] = None
 
@@ -91,15 +95,14 @@ async_loop: Optional[asyncio.AbstractEventLoop] = None
 def vision_pipeline_worker():
     """
     Background worker running the continuous vision, tracking, analytics, and overlay loop.
-    Encodes live frames into JPEG bytes, updates ESP32 hardware, and triggers WebSocket broadcast.
+    Encodes live frames into JPEG bytes, updates ESP32 hardware, logs to SQLite, and triggers WebSocket broadcast.
     """
-    global latest_jpeg_bytes, latest_telemetry, pipeline_running
+    global latest_jpeg_bytes, latest_telemetry, pipeline_running, last_detection_timestamp, last_db_snapshot_time
 
     print("[PIPELINE] Starting background vision pipeline worker...")
-    if not camera.start():
-        print("[ERROR] Camera failed to start in background worker.")
-        pipeline_running = False
-        return
+    camera_started = camera.start()
+    if not camera_started:
+        print("[WARN] Camera device offline on initial start. Running pipeline in fallback mode.")
 
     fps = 0.0
     frame_count = 0
@@ -108,82 +111,133 @@ def vision_pipeline_worker():
 
     while pipeline_running:
         ret, frame = camera.read_frame()
-        if not ret or frame is None:
-            time.sleep(0.01)
-            continue
-
         now = time.time()
 
-        # 1. Vision & Tracking
-        raw_tracks, active_cnt, total_det = tracker.track(frame)
-        eval_tracks, waiting_cnt = roi_mgr.evaluate_tracks(raw_tracks, frame.shape)
-        pixel_bounds = roi_mgr.get_pixel_bounds(frame.shape)
+        if not ret or frame is None:
+            # Camera offline / standby handling
+            total_det = 0
+            waiting_cnt = 0
+            active_cnt = 0
+            eval_tracks = []
+            pixel_bounds = (100, 100, 500, 400)
+            annotated_frame = None
+        else:
+            last_detection_timestamp = now
 
-        # 2. Queue & Waiting-Time Estimation
+            # 1. Vision & Tracking
+            raw_tracks, active_cnt, total_det = tracker.track(frame)
+            eval_tracks, waiting_cnt = roi_mgr.evaluate_tracks(raw_tracks, frame.shape)
+            pixel_bounds = roi_mgr.get_pixel_bounds(frame.shape)
+
+            # 2. FPS Measurement
+            frame_count += 1
+            if now - last_fps_time >= 0.3:
+                fps = frame_count / max(0.01, now - last_fps_time)
+                frame_count = 0
+                last_fps_time = now
+
+            # 3. Render Visual Overlay for MJPEG Video Feed
+            annotated_frame = frame.copy()
+            annotated_frame = overlay.draw_waiting_area(annotated_frame, pixel_bounds, waiting_cnt)
+            annotated_frame = overlay.draw_tracks(annotated_frame, eval_tracks)
+
+        # 4. Queue & Waiting-Time Estimation
         q_sum = queue_mgr.get_summary()
         w_est = estimator.get_queue_estimates(queue_mgr, current_time=now)
 
-        # 3. Analytics & Alerts
+        # 5. Analytics & Alerts
         tele = analytics.update(
             waiting_people_count=waiting_cnt,
             evaluated_tracks=eval_tracks,
             queue_manager=queue_mgr,
             wait_estimates=w_est,
+            total_people_detected=total_det,
             current_time=now,
         )
         alert_st = alert_mgr.process_telemetry(tele, current_time=now)
 
-        # 4. Automatic ESP32 Physical Alert Hardware Update (Non-blocking)
+        # 6. Automatic ESP32 Physical Alert Hardware Update (Non-blocking)
         hardware_client.send_hardware_state(alert_st.get("hardware", {}))
 
-        # 5. FPS Measurement
-        frame_count += 1
-        if now - last_fps_time >= 0.3:
-            fps = frame_count / (now - last_fps_time)
-            frame_count = 0
-            last_fps_time = now
+        # 7. Render HUD onto frame if camera is active
+        if annotated_frame is not None:
+            annotated_frame = overlay.draw_hud(
+                annotated_frame,
+                people_detected=total_det,
+                waiting_count=waiting_cnt,
+                active_tracks=active_cnt,
+                fps=fps,
+                queue_summary=q_sum,
+                wait_estimates=w_est,
+                telemetry=tele,
+                alert_state=alert_st,
+                camera_status="CONNECTED" if camera.is_connected else "DISCONNECTED",
+                yolo_status="RUNNING" if tracker.is_ready else "ERROR",
+                tracking_status="RUNNING" if tracker.is_ready else "ERROR",
+            )
+            ret_enc, jpeg_buffer = cv2.imencode(".jpg", annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
+            if ret_enc:
+                with latest_frame_lock:
+                    latest_jpeg_bytes = jpeg_buffer.tobytes()
 
-        # 6. Render Visual Overlay for MJPEG Video Feed
-        annotated_frame = frame.copy()
-        annotated_frame = overlay.draw_waiting_area(annotated_frame, pixel_bounds, waiting_cnt)
-        annotated_frame = overlay.draw_tracks(annotated_frame, eval_tracks)
-        annotated_frame = overlay.draw_hud(
-            annotated_frame,
-            people_detected=total_det,
-            waiting_count=waiting_cnt,
-            active_tracks=active_cnt,
-            fps=fps,
-            queue_summary=q_sum,
-            wait_estimates=w_est,
-            telemetry=tele,
-            alert_state=alert_st,
-            camera_status="CONNECTED" if camera.is_connected else "DISCONNECTED",
-            yolo_status="RUNNING" if tracker.is_ready else "ERROR",
-            tracking_status="RUNNING" if tracker.is_ready else "ERROR",
+        # 8. Record snapshot into database every 2 seconds
+        if now - last_db_snapshot_time >= 2.0:
+            last_db_snapshot_time = now
+            if db:
+                db.record_detection_snapshot(
+                    people_detected=total_det,
+                    waiting_area_count=waiting_cnt,
+                    active_tracks=active_cnt,
+                    crowd_status=tele.get("crowd_status", "NORMAL"),
+                    fps=fps if camera.is_connected else 0.0,
+                    camera_connected=camera.is_connected,
+                    yolo_running=tracker.is_ready,
+                    esp32_connected=hardware_client.is_connected,
+                    current_time=now,
+                )
+
+        # 9. Structured Real-Time Telemetry Payload
+        hw_status = hardware_client.get_status()
+        last_det_str = (
+            time.strftime("%I:%M:%S %p", time.localtime(last_detection_timestamp))
+            if last_detection_timestamp > 0
+            else "No detections yet"
         )
 
-        # 7. Encode Frame to JPEG
-        ret_enc, jpeg_buffer = cv2.imencode(".jpg", annotated_frame, [int(cv2.IMWRITE_JPEG_QUALITY), 75])
-        if ret_enc:
-            with latest_frame_lock:
-                latest_jpeg_bytes = jpeg_buffer.tobytes()
-
-        # 8. Package Structured Real-Time Telemetry Payload
         payload = {
             "timestamp": now,
+            "time_str": time.strftime("%I:%M:%S %p", time.localtime(now)),
             "system_online": True,
             "camera_connected": camera.is_connected,
+            "camera_status": "online" if camera.is_connected else "offline",
+            "detection_status": "active" if (camera.is_connected and tracker.is_ready) else "offline",
             "yolo_running": tracker.is_ready,
             "tracking_running": tracker.is_ready,
             "esp32_connected": hardware_client.is_connected,
             "esp32_ip": hardware_client.esp32_ip,
-            "fps": round(fps, 1),
+            "fps": round(fps, 1) if camera.is_connected else 0.0,
+            
+            # People & Crowd Analytics
+            "people_count": total_det,
             "people_detected": total_det,
             "waiting_area_count": waiting_cnt,
             "active_tracks": active_cnt,
+            "crowd_status": tele.get("crowd_status", "NORMAL"),
+            "peak_crowd": tele.get("peak_crowd", total_det),
+            "avg_crowd": tele.get("avg_crowd", float(total_det)),
+            "people_entering": tele.get("people_entering", 0),
+            "people_leaving": tele.get("people_leaving", 0),
+            "in_service_count": tele.get("in_service_count", 0),
+            "other_area_estimated": tele.get("other_area_estimated", 0),
+            "last_detection_timestamp": last_detection_timestamp,
+            "last_detection_time_str": last_det_str,
+            "chart_history": tele.get("chart_history", []),
+
+            # Queue & Waiting Times
             "current_token": q_sum.get("current_token_display", "None"),
             "next_token": q_sum.get("next_token_display", "None"),
             "tokens_waiting": q_sum.get("tokens_waiting_count", 0),
+            "tokens_completed": len(queue_mgr.get_completed_tokens()),
             "average_service_time_seconds": round(w_est.get("avg_service_time_seconds", 180.0), 1),
             "average_service_display": w_est.get("avg_display", "Waiting for data"),
             "is_measured_service_time": w_est.get("is_measured", False),
@@ -199,6 +253,12 @@ def vision_pipeline_worker():
             "prediction": alert_st.get("predicted_alert") or "Queue operating normally",
             "alert_message": alert_st.get("alert_banner", "Queue operating normally"),
             "is_long_wait": alert_st.get("is_long_wait", False),
+            
+            # Recommendation & Alert
+            "recommendation": alert_st.get("recommendation", {}),
+
+            # Counters & Tokens
+            "counters": queue_mgr.get_counters_info(),
             "waiting_queue": [
                 {
                     "token_id": item["token_id"],
@@ -207,7 +267,6 @@ def vision_pipeline_worker():
                     "estimated_wait": item["wait_str"],
                     "wait_seconds": item["wait_seconds"],
                     "customer_name": next((t.customer_name for t in queue_mgr.tokens if t.token_id == item["token_id"]), ""),
-                    "mobile_number": next((t.mobile_number for t in queue_mgr.tokens if t.token_id == item["token_id"]), ""),
                     "service_type": next((t.service_type for t in queue_mgr.tokens if t.token_id == item["token_id"]), "General Banking"),
                     "assigned_counter": next((t.assigned_counter for t in queue_mgr.tokens if t.token_id == item["token_id"]), 3),
                     "customer_id": next((t.customer_id for t in queue_mgr.tokens if t.token_id == item["token_id"]), ""),
@@ -215,9 +274,13 @@ def vision_pipeline_worker():
                 }
                 for item in w_est.get("waiting_estimates", [])
             ],
-            "counters": queue_mgr.get_counters_info(),
+
+            # Hardware Info & Events
             "hardware_flags": alert_st.get("hardware", {}),
+            "hardware_status": hw_status,
+            "hardware_events": hw_status.get("recent_events", []),
             "last_action": q_sum.get("last_action", "System ready"),
+            "thresholds": tele.get("thresholds", {"normal_max": 15, "moderate_max": 30}),
         }
 
         latest_telemetry = payload
@@ -283,6 +346,48 @@ async def get_system_status():
         "esp32_ip": hardware_client.esp32_ip,
         "active_ws_clients": len(ws_manager.active_connections),
         "latest_fps": latest_telemetry.get("fps", 0.0),
+        "people_detected": latest_telemetry.get("people_detected", 0),
+        "crowd_status": latest_telemetry.get("crowd_status", "NORMAL"),
+    }
+
+
+@app.get("/api/crowd/status")
+async def get_crowd_status_endpoint():
+    """Returns real-time camera-based crowd detection status."""
+    return {
+        "people_count": latest_telemetry.get("people_detected", 0),
+        "timestamp": latest_telemetry.get("timestamp", time.time()),
+        "crowd_status": latest_telemetry.get("crowd_status", "NORMAL"),
+        "camera_status": "online" if camera.is_connected else "offline",
+        "detection_status": "active" if (camera.is_connected and tracker.is_ready) else "offline",
+        "fps": latest_telemetry.get("fps", 0.0),
+        "peak_crowd": latest_telemetry.get("peak_crowd", 0),
+        "avg_crowd": latest_telemetry.get("avg_crowd", 0.0),
+        "last_detection_time": latest_telemetry.get("last_detection_time_str", "--"),
+    }
+
+
+@app.get("/api/config/thresholds")
+async def get_thresholds():
+    """Returns configurable crowd alert thresholds."""
+    return {
+        "normal_max": analytics.threshold_normal_max,
+        "moderate_max": analytics.threshold_moderate_max,
+        "high_min": analytics.threshold_moderate_max + 1,
+    }
+
+
+@app.post("/api/config/thresholds")
+async def set_thresholds(payload: Dict[str, Any] = Body(...)):
+    """Configures crowd alert thresholds dynamically."""
+    norm_max = int(payload.get("normal_max", 15))
+    mod_max = int(payload.get("moderate_max", 30))
+    analytics.set_thresholds(norm_max, mod_max)
+    return {
+        "status": "success",
+        "normal_max": analytics.threshold_normal_max,
+        "moderate_max": analytics.threshold_moderate_max,
+        "high_min": analytics.threshold_moderate_max + 1,
     }
 
 
@@ -305,7 +410,6 @@ async def get_queue_data():
                 "completed_at": t.completed_at,
                 "service_duration_seconds": t.service_duration_seconds,
                 "customer_name": t.customer_name,
-                "mobile_number": t.mobile_number,
                 "service_type": t.service_type,
                 "assigned_counter": t.assigned_counter,
                 "customer_id": t.customer_id,
@@ -320,11 +424,9 @@ async def get_queue_data():
 async def get_public_queue_data():
     """
     Public television queue display endpoint.
-    Returns clean customer-facing queue status, now serving token, wait time, and next tokens.
-    Guarantees that customer PII (names, phone numbers) is not exposed on public displays.
+    Guarantees zero customer PII exposure on public screens.
     """
     now = time.time()
-    q_sum = queue_mgr.get_summary()
     w_est = estimator.get_queue_estimates(queue_mgr, current_time=now)
 
     serving_token_obj = queue_mgr.get_serving_token() or queue_mgr.get_current_token()
@@ -386,7 +488,7 @@ async def get_analytics_data():
 
 @app.get("/api/alerts")
 async def get_alerts_data():
-    """Returns current alert status and deduplicated alert history log."""
+    """Returns current alert status, recommendations, and alert history log."""
     return {
         "current_level": alert_mgr.current_level,
         "current_message": alert_mgr.current_message,
@@ -397,19 +499,48 @@ async def get_alerts_data():
 
 
 # ==============================================================================
-# Hardware Status & Test Endpoints (Phase 8)
+# Audit Reports & Data Export Endpoints
+# ==============================================================================
+
+@app.get("/api/reports/summary")
+async def get_reports_summary(period: str = Query("today", regex="^(today|yesterday|7days)$")):
+    """Returns executive audit report summary for the specified period (today, yesterday, 7days)."""
+    if db:
+        return db.get_report_summary(period=period)
+    return {"error": "Database not initialized"}
+
+
+@app.get("/api/reports/export")
+async def export_reports(
+    format: str = Query("csv", regex="^(csv)$"),
+    period: str = Query("today", regex="^(today|yesterday|7days)$"),
+):
+    """Downloads real collected data as CSV audit report."""
+    if db:
+        csv_data = db.generate_csv_report(period=period)
+        filename = f"smart_bank_report_{period}_{time.strftime('%Y%m%d')}.csv"
+        return Response(
+            content=csv_data,
+            media_type="text/csv",
+            headers={"Content-Disposition": f"attachment; filename={filename}"},
+        )
+    return PlainTextResponse("Error: Database unavailable", status_code=500)
+
+
+# ==============================================================================
+# ESP32 Hardware Integration Endpoints
 # ==============================================================================
 
 @app.get("/api/hardware/status")
 async def get_hardware_status():
-    """Returns the current ESP32 connection state, IP, and GPIO mapping."""
+    """Returns current ESP32 status, IP, connection state, and recent hardware events."""
     return hardware_client.get_status()
 
 
 @app.post("/api/hardware/test")
 async def post_hardware_test(payload: Dict[str, Any] = Body(...)):
     """
-    Safe testing endpoint to verify physical LEDs and Buzzer on the ESP32.
+    Manual test endpoint to verify physical LEDs and Buzzer on the ESP32.
     Payload: {"level": "NORMAL" | "MODERATE" | "HIGH" | "CRITICAL"}
     """
     level = payload.get("level", "NORMAL")
@@ -421,16 +552,35 @@ async def post_hardware_test(payload: Dict[str, Any] = Body(...)):
     }
 
 
+@app.post("/api/esp32/heartbeat")
+async def esp32_push_heartbeat(payload: Dict[str, Any] = Body(...)):
+    """
+    Endpoint for ESP32 to push its heartbeat, uptime, and Wi-Fi RSSI to FastAPI.
+    """
+    device_id = payload.get("device_id", "ESP32_DEV_MODULE_01")
+    ip = payload.get("ip", "")
+    hardware_client.record_external_heartbeat(device_id=device_id, ip=ip, details=payload)
+    return {"status": "ack", "server_time": time.time()}
+
+
+@app.post("/api/esp32/event")
+async def esp32_push_event(payload: Dict[str, Any] = Body(...)):
+    """
+    Endpoint for ESP32 to push sensor trigger events (PIR motion, button press, OLED status).
+    """
+    event_type = payload.get("event_type", "SENSOR_TRIGGERED")
+    details = payload.get("details", "Hardware sensor trigger")
+    hardware_client.record_sensor_event(event_type=event_type, details=details)
+    return {"status": "recorded", "server_time": time.time()}
+
+
 # ==============================================================================
-# Token Action Endpoints (Counter-Aware & Registration-Enabled)
+# Token Action Endpoints
 # ==============================================================================
 
 @app.post("/api/tokens/generate")
 async def api_generate_token(payload: Optional[Dict[str, Any]] = Body(default=None)):
-    """
-    Generates a new token in WAITING state with customer metadata and assigned counter.
-    Payload: { "customer_name": str, "mobile_number": str, "service_type": str, "assigned_counter": int, "customer_id": str }
-    """
+    """Generates a new token in WAITING state with customer metadata and assigned counter."""
     data = payload or {}
     cust_name = data.get("customer_name", "")
     phone = data.get("mobile_number", "")
@@ -450,7 +600,6 @@ async def api_generate_token(payload: Optional[Dict[str, Any]] = Body(default=No
         "token_id": tok.token_id,
         "token_status": tok.status,
         "customer_name": tok.customer_name,
-        "mobile_number": tok.mobile_number,
         "service_type": tok.service_type,
         "assigned_counter": tok.assigned_counter,
         "customer_id": tok.customer_id,
@@ -460,10 +609,7 @@ async def api_generate_token(payload: Optional[Dict[str, Any]] = Body(default=No
 
 @app.post("/api/tokens/call_next")
 async def api_call_next(payload: Optional[Dict[str, Any]] = Body(default=None)):
-    """
-    Calls the next waiting token in line for a specific counter (or any waiting token).
-    Payload: { "counter": int }
-    """
+    """Calls the next waiting token in line for a specific counter."""
     data = payload or {}
     counter = data.get("counter")
     tok = queue_mgr.call_next(counter=counter)
@@ -481,10 +627,7 @@ async def api_call_next(payload: Optional[Dict[str, Any]] = Body(default=None)):
 
 @app.post("/api/tokens/start_service")
 async def api_start_service(payload: Optional[Dict[str, Any]] = Body(default=None)):
-    """
-    Transitions the called token to SERVING.
-    Payload: { "counter": int }
-    """
+    """Transitions the called token to SERVING."""
     data = payload or {}
     counter = data.get("counter")
     tok = queue_mgr.start_service(counter=counter)
@@ -502,10 +645,7 @@ async def api_start_service(payload: Optional[Dict[str, Any]] = Body(default=Non
 
 @app.post("/api/tokens/complete_service")
 async def api_complete_service(payload: Optional[Dict[str, Any]] = Body(default=None)):
-    """
-    Completes the currently serving token for a counter.
-    Payload: { "counter": int }
-    """
+    """Completes the currently serving token for a counter."""
     data = payload or {}
     counter = data.get("counter")
     tok = queue_mgr.complete_service(counter=counter)
@@ -525,10 +665,7 @@ async def api_complete_service(payload: Optional[Dict[str, Any]] = Body(default=
 
 @app.post("/api/tokens/skip")
 async def api_skip_token(payload: Optional[Dict[str, Any]] = Body(default=None)):
-    """
-    Skips the currently called/serving token for a counter.
-    Payload: { "counter": int }
-    """
+    """Skips the currently called/serving token for a counter."""
     data = payload or {}
     counter = data.get("counter")
     tok = queue_mgr.skip_token(counter=counter)

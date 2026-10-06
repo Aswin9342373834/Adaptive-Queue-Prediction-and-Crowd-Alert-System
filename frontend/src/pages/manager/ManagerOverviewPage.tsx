@@ -1,546 +1,360 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { Link } from 'react-router-dom';
 import {
   Users,
   Clock,
-  Hourglass,
-  CheckCircle2,
-  TrendingUp,
-  Sparkles,
-  AlertTriangle,
-  ArrowRight,
-  Camera,
-  Cpu,
-  ExternalLink,
-  ShieldCheck,
-  Activity,
   Layers,
+  Activity,
+  TrendingUp,
+  ExternalLink,
   Monitor,
+  Building,
 } from 'lucide-react';
 import { useQueue } from '../../context/QueueContext';
-import { StatusBadge } from '../../components/common/StatusBadge';
 import { MetricCard } from '../../components/common/MetricCard';
+import { SystemStatusBar } from '../../components/SystemStatusBar';
+import { LiveCrowdMonitor } from '../../components/LiveCrowdMonitor';
+import { CrowdAnalyticsCorrelation } from '../../components/CrowdAnalyticsCorrelation';
+import { RealTimeCrowdChart } from '../../components/RealTimeCrowdChart';
+import { ESP32ManagerPanel } from '../../components/ESP32ManagerPanel';
+import { CrowdAlertRecommendation } from '../../components/CrowdAlertRecommendation';
+import { DownloadableReportSection } from '../../components/DownloadableReportSection';
 import { api } from '../../services/api';
 
 export const ManagerOverviewPage: React.FC = () => {
-  const { telemetry } = useQueue();
+  const { telemetry, isConnected: wsConnected } = useQueue();
+  const [backendHealthy, setBackendHealthy] = useState(true);
 
-  const congestion = telemetry?.congestion_level ?? 'NORMAL';
-  const waitingPeople = telemetry?.waiting_area_count ?? 0;
-  const tokensWaiting = telemetry?.tokens_waiting ?? 0;
-  const currentTotalWaiting = Math.max(waitingPeople, tokensWaiting);
-  const avgServiceTimeSec = telemetry?.average_service_time_seconds ?? 180;
-  const avgWaitMinutes = telemetry ? Math.round(telemetry.max_wait_minutes || (avgServiceTimeSec / 60) * Math.max(1, currentTotalWaiting)) : 8;
-  const arrivalRate = telemetry?.arrival_rate ?? 2.4;
-  const serviceRate = telemetry?.service_rate ?? 3.1;
-  const isSurge = congestion === 'HIGH' || congestion === 'CRITICAL';
+  // Periodic health ping for backend connection state
+  useEffect(() => {
+    const checkHealth = async () => {
+      try {
+        await api.getStatus();
+        setBackendHealthy(true);
+      } catch {
+        setBackendHealthy(false);
+      }
+    };
+    checkHealth();
+    const interval = setInterval(checkHealth, 5000);
+    return () => clearInterval(interval);
+  }, []);
 
-  // Active serving token and upcoming tokens
-  const servingToken =
-    (telemetry?.serving_token_id && telemetry.serving_token_id !== 'None')
-      ? telemetry.serving_token_id
-      : (telemetry?.current_token && telemetry.current_token !== 'None')
-      ? telemetry.current_token
-      : null;
+  const peopleCount = telemetry?.people_detected ?? 0;
+  const waitingTokens = telemetry?.tokens_waiting ?? 0;
+  const waitingAreaCount = telemetry?.waiting_area_count ?? 0;
+  const effectiveWaiting = Math.max(waitingTokens, waitingAreaCount);
 
-  const nextTokens = telemetry?.waiting_queue?.slice(0, 5) ?? [];
+  const avgServiceSec = telemetry?.average_service_time_seconds ?? 180;
+  const avgWaitMin = Math.round(telemetry?.max_wait_minutes ?? (avgServiceSec / 60) * Math.max(1, effectiveWaiting));
 
-  // Forecast numbers based on arrival/service rates
-  const forecastNow = currentTotalWaiting;
-  const forecast15 = Math.max(0, Math.round(currentTotalWaiting + (arrivalRate - serviceRate) * 15 * 0.4 + 4));
-  const forecast30 = Math.max(0, Math.round(currentTotalWaiting + (arrivalRate - serviceRate) * 30 * 0.4 + 7));
-  const forecast60 = Math.max(0, Math.round(Math.max(2, currentTotalWaiting * 0.75)));
+  const counters = telemetry?.counters ?? [];
+  const activeCountersCount = counters.filter((c) => c.active).length;
+  const totalCountersCount = counters.length || 5;
 
-  // Recommendation engine based on queue trend
-  const recommendedAction =
-    congestion === 'CRITICAL'
-      ? 'Deploy Floating Supervisor & Open Auxiliary Counter 5 immediately'
-      : congestion === 'HIGH'
-      ? 'Open Counter 5 to prevent wait times from exceeding 15 minutes'
-      : congestion === 'MODERATE'
-      ? 'Keep all 4 active counters staffed and monitor queue growth'
-      : 'Maintain standard 3 counters; traffic flow is optimal';
+  const crowdStatus = telemetry?.crowd_status || 'NORMAL';
+  const peakCrowd = telemetry?.peak_crowd ?? peopleCount;
+  const cameraConnected = !!telemetry?.camera_connected;
+  const yoloActive = !!telemetry?.yolo_running;
+  const esp32Connected = !!telemetry?.esp32_connected;
+  const lastDetectionTime = telemetry?.last_detection_time_str || '--';
+  const chartHistory = telemetry?.chart_history || [];
 
   return (
     <div className="space-y-6">
       {/* ==================================================================== */}
-      {/* 1. BRANCH STATUS HERO BANNER */}
+      {/* HEADER: Smart Bank Manager Dashboard + Live Status Bar */}
       {/* ==================================================================== */}
-      <div className="rounded-2xl bg-white border border-[#E2E8F0] p-6 sm:p-8 shadow-sm relative overflow-hidden">
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
-          <div className="space-y-3">
-            <div className="flex flex-wrap items-center gap-3">
-              <span className="text-xs font-bold text-[#64748B] uppercase tracking-wider">
-                Branch Operational Health
-              </span>
-              <StatusBadge level={congestion} size="md" />
-              <span className="text-xs font-mono font-bold text-[#1769E0] bg-[#EFF6FF] px-2.5 py-1 rounded-lg border border-[#BFDBFE]">
-                Pacing: {telemetry?.queue_trend ?? 'STABLE'}
-              </span>
-            </div>
-
-            <h2 className="text-2xl sm:text-3xl font-black text-[#172033] tracking-tight">
-              Metro Central Branch Queue Overview
-            </h2>
-
-            <p className="text-sm text-[#64748B] max-w-2xl leading-relaxed font-medium">
-              {telemetry?.alert_message ||
-                'Queue is operating smoothly with standard customer wait times.'}
-            </p>
-          </div>
-
-          {/* Quick High-Level Counters */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 bg-[#F8FAFC] p-4 rounded-2xl border border-[#E2E8F0] shrink-0">
-            <div className="text-center px-2">
-              <span className="text-[10px] font-bold text-[#64748B] uppercase block">People Waiting</span>
-              <span className="text-2xl font-black font-mono text-[#172033]">{currentTotalWaiting}</span>
-            </div>
-            <div className="text-center px-2 border-l border-[#E2E8F0]">
-              <span className="text-[10px] font-bold text-[#64748B] uppercase block">Avg Wait</span>
-              <span className="text-2xl font-black font-mono text-[#1769E0]">{avgWaitMinutes}m</span>
-            </div>
-            <div className="text-center px-2 border-l border-[#E2E8F0]">
-              <span className="text-[10px] font-bold text-[#64748B] uppercase block">Active Counters</span>
-              <span className="text-2xl font-black font-mono text-[#16A34A]">{isSurge ? '4 / 6' : '3 / 6'}</span>
-            </div>
-            <div className="text-center px-2 border-l border-[#E2E8F0]">
-              <span className="text-[10px] font-bold text-[#64748B] uppercase block">Total Served</span>
-              <span className="text-2xl font-black font-mono text-[#172033]">{Math.max(148, currentTotalWaiting * 6 + 120)}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      {/* ==================================================================== */}
-      {/* 2. REAL-TIME QUEUE MONITOR & SERVING SECTION */}
-      {/* ==================================================================== */}
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
-        {/* Left 6 Cols: Currently Serving Monitor */}
-        <div className="lg:col-span-6 bg-white rounded-2xl border border-[#E2E8F0] p-6 shadow-sm flex flex-col justify-between">
-          <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-4 mb-4">
-            <div className="flex items-center gap-2">
-              <div className="w-2.5 h-2.5 rounded-full bg-[#1769E0] animate-pulse"></div>
-              <h3 className="text-sm font-bold text-[#172033] uppercase tracking-wider">
-                Real-Time Queue Monitor
-              </h3>
-            </div>
-            <Link
-              to="/display"
-              target="_blank"
-              className="text-xs font-semibold text-[#1769E0] hover:underline flex items-center gap-1"
-            >
-              <span>Public TV View</span>
-              <ExternalLink className="w-3.5 h-3.5" />
-            </Link>
-          </div>
-
-          <div className="my-auto py-4 text-center">
-            <span className="text-xs font-bold text-[#64748B] uppercase tracking-wider block mb-1">
-              NOW SERVING
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-[#E2E8F0] pb-5">
+        <div>
+          <div className="flex items-center gap-2 mb-1">
+            <span className="p-1.5 rounded-lg bg-[#EFF6FF] text-[#1769E0] border border-[#BFDBFE]">
+              <Building className="w-4 h-4" />
             </span>
-            <div className="text-5xl sm:text-6xl font-black font-mono text-[#1769E0] tracking-tight mb-2">
-              {servingToken || 'Ready for Next'}
-            </div>
-            <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-xl bg-[#EFF6FF] border border-[#BFDBFE] text-[#1769E0] font-bold text-sm font-mono">
-              <Monitor className="w-4 h-4" />
-              <span>COUNTER 03</span>
-            </div>
-          </div>
-
-          {/* Upcoming Tokens list */}
-          <div className="pt-4 border-t border-[#F1F5F9]">
-            <span className="text-xs font-bold text-[#64748B] uppercase tracking-wider block mb-2.5">
-              Next in Line:
+            <span className="text-xs font-bold text-[#1769E0] uppercase tracking-wider">
+              Smart Bank &bull; Manager Control Center
             </span>
-            {nextTokens.length === 0 ? (
-              <p className="text-xs text-[#64748B]">No waiting customers in queue.</p>
-            ) : (
-              <div className="flex flex-wrap items-center gap-2">
-                {nextTokens.map((tok, idx) => (
-                  <span
-                    key={tok.token_id || idx}
-                    className="px-3 py-1.5 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-xs font-bold font-mono text-[#172033] flex items-center gap-1.5"
-                  >
-                    <span className="text-[#94A3B8]">#{idx + 1}</span>
-                    <span>{tok.token_id}</span>
-                  </span>
-                ))}
-              </div>
-            )}
           </div>
+          <h2 className="text-2xl sm:text-3xl font-black text-[#172033] tracking-tight">
+            Metro Central Branch Operations & Crowd Intelligence
+          </h2>
+          <p className="text-xs text-[#64748B] mt-0.5 font-medium">
+            Real-time computer vision detection, crowd flow pacing, counter telemetry, and ESP32 hardware gateway
+          </p>
         </div>
 
-        {/* Right 6 Cols: AI Crowd Prediction */}
-        <div className="lg:col-span-6 bg-white rounded-2xl border border-[#E2E8F0] p-6 shadow-sm flex flex-col justify-between">
-          <div>
-            <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-4 mb-4">
-              <div className="flex items-center gap-2.5">
-                <div className="p-2 rounded-xl bg-[#EFF6FF] text-[#1769E0] border border-[#BFDBFE]">
-                  <Sparkles className="w-4 h-4" />
-                </div>
-                <div>
-                  <h3 className="text-sm font-bold text-[#172033] uppercase tracking-wider">
-                    AI Crowd Pacing & Forecast
-                  </h3>
-                  <p className="text-xs text-[#64748B]">
-                    Predictive queue load modeling over 60-minute window
-                  </p>
-                </div>
-              </div>
-              <Link
-                to="/manager/prediction"
-                className="text-xs text-[#64748B] hover:text-[#1769E0] transition-colors"
-              >
-                <ExternalLink className="w-4 h-4" />
-              </Link>
-            </div>
-
-            {/* Prediction Statement Box */}
-            <div
-              className={`p-4 rounded-2xl border mb-4 ${
-                isSurge
-                  ? 'bg-[#FEF3C7] border-[#FDE68A] text-[#92400E]'
-                  : 'bg-[#F8FAFC] border-[#E2E8F0] text-[#172033]'
-              }`}
-            >
-              <div className="flex items-start gap-3">
-                <AlertTriangle
-                  className={`w-5 h-5 shrink-0 mt-0.5 ${
-                    isSurge ? 'text-[#D97706]' : 'text-[#1769E0]'
-                  }`}
-                />
-                <div>
-                  <span className="text-xs font-bold uppercase tracking-wider block">
-                    Prediction Summary
-                  </span>
-                  <p className="text-xs sm:text-sm font-semibold mt-1">
-                    {telemetry?.prediction && telemetry.prediction !== 'Queue operating normally'
-                      ? telemetry.prediction
-                      : 'Queue density is expected to remain stable with no sudden bottlenecks.'}
-                  </p>
-                </div>
-              </div>
-            </div>
-
-            {/* Time Horizon Cards */}
-            <div className="grid grid-cols-4 gap-2.5 mb-4">
-              <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-center">
-                <span className="text-[10px] font-bold text-[#64748B] uppercase block">Now</span>
-                <span className="text-xl font-black font-mono text-[#172033] mt-1 block">{forecastNow}</span>
-                <span className="text-[10px] text-[#94A3B8]">people</span>
-              </div>
-              <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-center">
-                <span className="text-[10px] font-bold text-[#64748B] uppercase block">+15 Min</span>
-                <span className="text-xl font-black font-mono text-[#1769E0] mt-1 block">{forecast15}</span>
-                <span className="text-[10px] text-[#94A3B8]">forecast</span>
-              </div>
-              <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-center">
-                <span className="text-[10px] font-bold text-[#64748B] uppercase block">+30 Min</span>
-                <span className="text-xl font-black font-mono text-[#D97706] mt-1 block">{forecast30}</span>
-                <span className="text-[10px] text-[#94A3B8]">forecast</span>
-              </div>
-              <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-center">
-                <span className="text-[10px] font-bold text-[#64748B] uppercase block">+60 Min</span>
-                <span className="text-xl font-black font-mono text-[#16A34A] mt-1 block">{forecast60}</span>
-                <span className="text-[10px] text-[#94A3B8]">forecast</span>
-              </div>
-            </div>
-          </div>
-
-          {/* Recommended Action Pill */}
-          <div className="p-3.5 rounded-xl bg-[#EFF6FF] border border-[#BFDBFE] flex items-center justify-between gap-3">
-            <div>
-              <span className="text-[10px] font-bold text-[#1769E0] uppercase tracking-wider block">
-                RECOMMENDED ACTION
-              </span>
-              <span className="text-xs sm:text-sm font-bold text-[#172033] mt-0.5 block">
-                {recommendedAction}
-              </span>
-            </div>
-            <Link
-              to="/manager/prediction"
-              className="px-3 py-1.5 rounded-xl bg-[#1769E0] hover:bg-[#1558BD] text-white text-xs font-bold shrink-0 transition-colors cursor-pointer"
-            >
-              Take Action
-            </Link>
-          </div>
-        </div>
-      </div>
-
-      {/* ==================================================================== */}
-      {/* 3. KEY PERFORMANCE METRICS */}
-      {/* ==================================================================== */}
-      <div>
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-sm font-bold text-[#172033] uppercase tracking-wider flex items-center gap-2">
-            <Activity className="w-4 h-4 text-[#1769E0]" />
-            Key Branch Performance Indicators
-          </h3>
+        <div className="flex items-center gap-2">
           <Link
-            to="/manager/analytics"
-            className="text-xs font-semibold text-[#1769E0] hover:underline flex items-center gap-1"
+            to="/display"
+            target="_blank"
+            className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-white hover:bg-[#F8FAFC] border border-[#CBD5E1] text-[#172033] text-xs font-bold transition-all shadow-2xs cursor-pointer"
           >
-            <span>Detailed Analytics</span>
-            <ArrowRight className="w-3.5 h-3.5" />
+            <span>Public TV View</span>
+            <ExternalLink className="w-3.5 h-3.5 text-[#1769E0]" />
           </Link>
         </div>
+      </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
-          <MetricCard
-            title="People In Branch"
-            value={telemetry?.people_detected ?? '--'}
-            subtitle="AI computer vision count"
-            icon={Users}
-            colorScheme="cyan"
+      {/* Persistent System Status Bar (Section 16) */}
+      <SystemStatusBar
+        backendConnected={backendHealthy}
+        cameraConnected={cameraConnected}
+        yoloActive={yoloActive}
+        esp32Connected={esp32Connected}
+        websocketConnected={wsConnected}
+      />
+
+      {/* ==================================================================== */}
+      {/* ROW 1: KEY PERFORMANCE INDICATORS */}
+      {/* ==================================================================== */}
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+        <MetricCard
+          title="Current Crowd"
+          value={cameraConnected ? peopleCount : 0}
+          subtitle={`Density: ${crowdStatus}`}
+          icon={Users}
+          colorScheme={crowdStatus === 'HIGH' ? 'rose' : crowdStatus === 'MODERATE' ? 'amber' : 'cyan'}
+          trend={{ value: `${crowdStatus}`, isPositive: crowdStatus === 'NORMAL' }}
+        />
+
+        <MetricCard
+          title="Waiting Queue"
+          value={waitingTokens}
+          subtitle={`${waitingAreaCount} in waiting zone`}
+          icon={Layers}
+          colorScheme="blue"
+          trend={{ value: `${telemetry?.queue_trend ?? 'STABLE'}`, isPositive: true }}
+        />
+
+        <MetricCard
+          title="Average Wait"
+          value={`${avgWaitMin} min`}
+          subtitle={`Avg Service: ${Math.floor(avgServiceSec / 60)}:${String(Math.floor(avgServiceSec % 60)).padStart(2, '0')}`}
+          icon={Clock}
+          colorScheme={avgWaitMin > 15 ? 'rose' : 'emerald'}
+        />
+
+        <MetricCard
+          title="Active Counters"
+          value={`${activeCountersCount} / ${totalCountersCount}`}
+          subtitle="Staffed service desks"
+          icon={Activity}
+          colorScheme="indigo"
+        />
+      </div>
+
+      {/* ==================================================================== */}
+      {/* ROW 2: LIVE CAMERA MONITOR + REAL-TIME CROWD ANALYTICS */}
+      {/* ==================================================================== */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-stretch">
+        {/* Left 6 Cols: Live Crowd Monitor */}
+        <div className="lg:col-span-6 flex flex-col">
+          <LiveCrowdMonitor
+            cameraConnected={cameraConnected}
+            yoloRunning={yoloActive}
+            fps={telemetry?.fps ?? 0}
+            peopleCount={peopleCount}
+            lastDetectionTime={lastDetectionTime}
+            crowdStatus={crowdStatus}
           />
-          <MetricCard
-            title="Waiting In Line"
-            value={tokensWaiting}
-            subtitle="Active queue tokens"
-            icon={Layers}
-            colorScheme="blue"
-            trend={{ value: `${telemetry?.queue_trend ?? 'Stable'}`, isPositive: true }}
-          />
-          <MetricCard
-            title="Avg Service Time"
-            value={
-              telemetry
-                ? `${Math.floor(avgServiceTimeSec / 60)}:${String(
-                    Math.floor(avgServiceTimeSec % 60)
-                  ).padStart(2, '0')}`
-                : '3:00'
-            }
-            subtitle={telemetry?.is_measured_service_time ? 'Empirical data' : 'Estimated baseline'}
-            icon={Clock}
-            colorScheme="indigo"
-          />
-          <MetricCard
-            title="Max Wait Time"
-            value={`${avgWaitMinutes} min`}
-            subtitle={telemetry?.is_long_wait ? 'Threshold exceeded' : 'Within 15m target'}
-            icon={Hourglass}
-            colorScheme={telemetry?.is_long_wait ? 'rose' : 'emerald'}
-          />
-          <MetricCard
-            title="Arrival Rate"
-            value={`${arrivalRate} /m`}
-            subtitle="New arrivals per min"
-            icon={TrendingUp}
-            colorScheme="amber"
-          />
-          <MetricCard
-            title="Service Rate"
-            value={`${serviceRate} /m`}
-            subtitle="Completions per min"
-            icon={CheckCircle2}
-            colorScheme="emerald"
-          />
+        </div>
+
+        {/* Right 6 Cols: Real-Time Crowd Analytics & Correlation */}
+        <div className="lg:col-span-6 flex flex-col">
+          <CrowdAnalyticsCorrelation telemetry={telemetry} />
         </div>
       </div>
 
       {/* ==================================================================== */}
-      {/* 4. BOTTOM ROW: LIVE CAMERA STREAM & PHYSICAL HARDWARE SUMMARY */}
+      {/* ROW 3: REAL-TIME CROWD TREND GRAPH (Section 5) */}
+      {/* ==================================================================== */}
+      <RealTimeCrowdChart
+        data={chartHistory}
+        currentCount={peopleCount}
+        peakCount={peakCrowd}
+        crowdStatus={crowdStatus}
+      />
+
+      {/* ==================================================================== */}
+      {/* ROW 4: QUEUE ANALYTICS + COUNTER PERFORMANCE (Section 4 & 17) */}
       {/* ==================================================================== */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Left 6 Cols: Live Crowd Vision */}
-        <div className="lg:col-span-6 bg-white rounded-2xl border border-[#E2E8F0] p-6 shadow-sm flex flex-col justify-between">
+        {/* Left 5 Cols: Queue Flow Analytics */}
+        <div className="lg:col-span-5 bg-white rounded-2xl border border-[#E2E8F0] p-6 shadow-sm flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-4 mb-4">
               <div className="flex items-center gap-2.5">
                 <div className="p-2 rounded-xl bg-[#EFF6FF] text-[#1769E0] border border-[#BFDBFE]">
-                  <Camera className="w-4 h-4" />
+                  <TrendingUp className="w-4 h-4" />
                 </div>
                 <div>
                   <h3 className="text-sm font-bold text-[#172033] uppercase tracking-wider">
-                    Live Crowd Vision
+                    Queue Pacing & Rates
                   </h3>
                   <p className="text-xs text-[#64748B]">
-                    Real-time waiting area detection & spatial tracking
+                    Mathematical queue growth and throughput pacing
                   </p>
                 </div>
               </div>
 
-              <div className="flex items-center gap-2">
-                <span className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-[#DCFCE7] text-[11px] font-mono font-bold text-[#16A34A] border border-[#86EFAC]">
-                  <span className="w-2 h-2 rounded-full bg-[#16A34A] animate-ping" />
-                  <span>{telemetry?.fps ? `${telemetry.fps} FPS` : 'LIVE'}</span>
-                </span>
-                <Link
-                  to="/manager/vision"
-                  className="p-1.5 rounded-lg bg-[#F8FAFC] hover:bg-[#F1F5F9] text-[#172033] border border-[#E2E8F0] transition-colors"
-                  title="Full Vision Panel"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                </Link>
-              </div>
+              <span className="px-2.5 py-1 rounded-lg bg-[#F8FAFC] border border-[#E2E8F0] text-xs font-mono font-bold text-[#172033]">
+                {telemetry?.queue_trend ?? 'STABLE'}
+              </span>
             </div>
 
-            {/* Video Frame */}
-            <div className="relative aspect-video w-full rounded-xl overflow-hidden bg-[#F8FAFC] border border-[#E2E8F0] flex items-center justify-center">
-              {telemetry?.camera_connected ? (
-                <img
-                  src={api.getVideoFeedUrl()}
-                  alt="Live Camera Feed"
-                  className="w-full h-full object-contain"
-                />
-              ) : (
-                <div className="text-center p-6 text-[#94A3B8]">
-                  <Camera className="w-10 h-10 mx-auto mb-2 text-[#CBD5E1]" />
-                  <span className="text-xs font-semibold text-[#64748B] block">Camera Standby</span>
-                  <span className="text-[10px] text-[#94A3B8]">Computer vision active in background</span>
-                </div>
-              )}
+            <div className="space-y-3 font-mono text-xs">
+              <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] flex items-center justify-between">
+                <span className="font-sans text-[#64748B] font-bold">Arrival Rate:</span>
+                <span className="font-bold text-[#172033]">{telemetry?.arrival_rate ?? 2.4} / min</span>
+              </div>
+
+              <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] flex items-center justify-between">
+                <span className="font-sans text-[#64748B] font-bold">Service Rate:</span>
+                <span className="font-bold text-[#16A34A]">{telemetry?.service_rate ?? 3.1} / min</span>
+              </div>
+
+              <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] flex items-center justify-between">
+                <span className="font-sans text-[#64748B] font-bold">Queue Growth Velocity:</span>
+                <span className={`font-bold ${(telemetry?.queue_growth_rate ?? 0) > 0 ? 'text-[#D97706]' : 'text-[#16A34A]'}`}>
+                  {telemetry?.queue_growth_rate ?? 0.0} / min
+                </span>
+              </div>
+
+              <div className="p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] flex items-center justify-between">
+                <span className="font-sans text-[#64748B] font-bold">Max Anticipated Wait:</span>
+                <span className="font-bold text-[#1769E0]">{avgWaitMin} minutes</span>
+              </div>
             </div>
           </div>
 
-          <div className="grid grid-cols-3 gap-3 mt-4 pt-3 border-t border-[#F1F5F9] text-center text-xs font-mono">
-            <div className="p-2 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
-              <span className="text-[10px] font-bold text-[#64748B] uppercase block font-sans">Detected</span>
-              <span className="text-lg font-bold text-[#172033]">{telemetry?.people_detected ?? 0}</span>
-            </div>
-            <div className="p-2 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
-              <span className="text-[10px] font-bold text-[#64748B] uppercase block font-sans">Waiting Area</span>
-              <span className="text-lg font-bold text-[#16A34A]">{telemetry?.waiting_area_count ?? 0}</span>
-            </div>
-            <div className="p-2 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0]">
-              <span className="text-[10px] font-bold text-[#64748B] uppercase block font-sans">Tracking</span>
-              <span className="text-lg font-bold text-[#1769E0]">Optimal</span>
-            </div>
+          <div className="p-3 rounded-xl bg-[#EFF6FF] border border-[#BFDBFE] text-xs text-[#1769E0] font-medium mt-4">
+            Service pacing benchmark target: <strong>3:30 min</strong> per transaction.
           </div>
         </div>
 
-        {/* Right 6 Cols: Hardware & Alerts Summary */}
-        <div className="lg:col-span-6 bg-white rounded-2xl border border-[#E2E8F0] p-6 shadow-sm flex flex-col justify-between">
+        {/* Right 7 Cols: Real-Time Counter Performance */}
+        <div className="lg:col-span-7 bg-white rounded-2xl border border-[#E2E8F0] p-6 shadow-sm flex flex-col justify-between">
           <div>
             <div className="flex items-center justify-between border-b border-[#F1F5F9] pb-4 mb-4">
-              <div className="flex items-center gap-2">
-                <Cpu className="w-4 h-4 text-[#1769E0]" />
-                <h3 className="text-sm font-bold text-[#172033] uppercase tracking-wider">
-                  Physical Alert Hardware & Notifications
-                </h3>
-              </div>
-              <Link
-                to="/manager/hardware"
-                className="text-xs font-semibold text-[#1769E0] hover:underline flex items-center gap-1"
-              >
-                <span>Hardware Panel</span>
-                <ArrowRight className="w-3.5 h-3.5" />
-              </Link>
-            </div>
-
-            <div className="space-y-3">
-              <div className="flex items-center justify-between p-3 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] text-xs">
-                <span className="text-[#172033] font-semibold">ESP32 Alert Module</span>
-                <span
-                  className={`font-mono font-bold ${
-                    telemetry?.esp32_connected ? 'text-[#16A34A]' : 'text-[#D97706]'
-                  }`}
-                >
-                  {telemetry?.esp32_connected ? 'CONNECTED (192.168.1.100)' : 'STANDBY MODE'}
-                </span>
-              </div>
-
-              {/* LED Matrix Preview */}
-              <div className="grid grid-cols-5 gap-2 text-center text-[10px] font-mono">
-                <div
-                  className={`p-2 rounded-xl border ${
-                    telemetry?.hardware_flags?.led_green
-                      ? 'bg-[#DCFCE7] border-[#86EFAC] text-[#16A34A] font-bold'
-                      : 'bg-[#F8FAFC] border-[#E2E8F0] text-[#94A3B8]'
-                  }`}
-                >
-                  <span
-                    className={`w-2.5 h-2.5 rounded-full mx-auto mb-1 block ${
-                      telemetry?.hardware_flags?.led_green ? 'bg-[#16A34A]' : 'bg-[#CBD5E1]'
-                    }`}
-                  />
-                  <span>GREEN</span>
+              <div className="flex items-center gap-2.5">
+                <div className="p-2 rounded-xl bg-[#EFF6FF] text-[#1769E0] border border-[#BFDBFE]">
+                  <Monitor className="w-4 h-4" />
                 </div>
-
-                <div
-                  className={`p-2 rounded-xl border ${
-                    telemetry?.hardware_flags?.led_yellow
-                      ? 'bg-[#FEF3C7] border-[#FDE68A] text-[#D97706] font-bold'
-                      : 'bg-[#F8FAFC] border-[#E2E8F0] text-[#94A3B8]'
-                  }`}
-                >
-                  <span
-                    className={`w-2.5 h-2.5 rounded-full mx-auto mb-1 block ${
-                      telemetry?.hardware_flags?.led_yellow ? 'bg-[#D97706]' : 'bg-[#CBD5E1]'
-                    }`}
-                  />
-                  <span>YELLOW</span>
-                </div>
-
-                <div
-                  className={`p-2 rounded-xl border ${
-                    telemetry?.hardware_flags?.led_orange
-                      ? 'bg-[#FFEDD5] border-[#FDBA74] text-[#EA580C] font-bold'
-                      : 'bg-[#F8FAFC] border-[#E2E8F0] text-[#94A3B8]'
-                  }`}
-                >
-                  <span
-                    className={`w-2.5 h-2.5 rounded-full mx-auto mb-1 block ${
-                      telemetry?.hardware_flags?.led_orange ? 'bg-[#EA580C]' : 'bg-[#CBD5E1]'
-                    }`}
-                  />
-                  <span>ORANGE</span>
-                </div>
-
-                <div
-                  className={`p-2 rounded-xl border ${
-                    telemetry?.hardware_flags?.led_red
-                      ? 'bg-[#FEE2E2] border-[#FCA5A5] text-[#DC2626] font-bold animate-pulse'
-                      : 'bg-[#F8FAFC] border-[#E2E8F0] text-[#94A3B8]'
-                  }`}
-                >
-                  <span
-                    className={`w-2.5 h-2.5 rounded-full mx-auto mb-1 block ${
-                      telemetry?.hardware_flags?.led_red ? 'bg-[#DC2626]' : 'bg-[#CBD5E1]'
-                    }`}
-                  />
-                  <span>RED</span>
-                </div>
-
-                <div
-                  className={`p-2 rounded-xl border ${
-                    telemetry?.hardware_flags?.buzzer
-                      ? 'bg-[#FEE2E2] border-[#FCA5A5] text-[#DC2626] font-bold animate-pulse'
-                      : 'bg-[#F8FAFC] border-[#E2E8F0] text-[#94A3B8]'
-                  }`}
-                >
-                  <span
-                    className={`w-2.5 h-2.5 rounded-full mx-auto mb-1 block ${
-                      telemetry?.hardware_flags?.buzzer ? 'bg-[#DC2626]' : 'bg-[#CBD5E1]'
-                    }`}
-                  />
-                  <span>BUZZER</span>
-                </div>
-              </div>
-
-              {/* Latest Alert */}
-              <div className="p-3.5 rounded-xl bg-[#F8FAFC] border border-[#E2E8F0] flex items-start gap-3">
-                <div className="p-1.5 rounded-lg bg-[#EFF6FF] text-[#1769E0] border border-[#BFDBFE] mt-0.5">
-                  <ShieldCheck className="w-4 h-4" />
-                </div>
-                <div className="flex-1">
-                  <div className="flex items-center justify-between">
-                    <span className="text-xs font-bold text-[#172033]">Operational Notification</span>
-                    <span className="text-[10px] text-[#64748B] font-mono">Live</span>
-                  </div>
-                  <p className="text-xs text-[#64748B] mt-0.5 font-medium">
-                    {telemetry?.alert_message || 'Queue operating within normal branch capacity.'}
+                <div>
+                  <h3 className="text-sm font-bold text-[#172033] uppercase tracking-wider">
+                    Counter Performance & Service Status
+                  </h3>
+                  <p className="text-xs text-[#64748B]">
+                    Active bank tellers and live transaction durations
                   </p>
                 </div>
               </div>
+
+              <span className="text-xs font-mono text-[#64748B]">
+                {activeCountersCount} Active Desks
+              </span>
+            </div>
+
+            <div className="overflow-x-auto rounded-xl border border-[#E2E8F0]">
+              <table className="w-full text-left font-mono text-xs">
+                <thead>
+                  <tr className="bg-[#F8FAFC] border-b border-[#E2E8F0] text-[#64748B] text-[11px] uppercase tracking-wider">
+                    <th className="py-2.5 px-3">Counter</th>
+                    <th className="py-2.5 px-3">Officer</th>
+                    <th className="py-2.5 px-3">Status</th>
+                    <th className="py-2.5 px-3">Now Serving</th>
+                    <th className="py-2.5 px-3 text-right">In Queue</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-[#F1F5F9]">
+                  {counters.map((cntr) => {
+                    const activeTok = cntr.active_token;
+                    const isServing = cntr.current_status === 'SERVING' || activeTok?.status === 'SERVING';
+                    const isCalled = cntr.current_status === 'CALLED' || activeTok?.status === 'CALLED';
+
+                    return (
+                      <tr key={cntr.counter} className="hover:bg-[#F8FAFC]">
+                        <td className="py-2.5 px-3 font-bold text-[#1769E0]">
+                          Counter {String(cntr.counter).padStart(2, '0')}
+                        </td>
+                        <td className="py-2.5 px-3 font-sans font-medium text-[#172033]">
+                          {cntr.officer}
+                        </td>
+                        <td className="py-2.5 px-3">
+                          {isServing ? (
+                            <span className="px-2 py-0.5 rounded-md bg-[#EFF6FF] text-[#1769E0] border border-[#BFDBFE] text-[10px] font-bold">
+                              IN SERVICE
+                            </span>
+                          ) : isCalled ? (
+                            <span className="px-2 py-0.5 rounded-md bg-[#FEF3C7] text-[#D97706] border border-[#FDE68A] text-[10px] font-bold">
+                              CALLED
+                            </span>
+                          ) : cntr.active ? (
+                            <span className="px-2 py-0.5 rounded-md bg-[#DCFCE7] text-[#16A34A] border border-[#86EFAC] text-[10px] font-bold">
+                              READY
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-md bg-[#F1F5F9] text-[#94A3B8] border border-[#E2E8F0] text-[10px] font-bold">
+                              OFFLINE
+                            </span>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 font-bold">
+                          {activeTok?.token_id ? (
+                            <span className="text-[#172033]">
+                              {activeTok.token_id}{' '}
+                              {activeTok.elapsed_str && (
+                                <span className="text-[10px] text-[#64748B] font-normal">
+                                  ({activeTok.elapsed_str})
+                                </span>
+                              )}
+                            </span>
+                          ) : (
+                            <span className="text-[#94A3B8]">--</span>
+                          )}
+                        </td>
+                        <td className="py-2.5 px-3 text-right font-bold text-[#172033]">
+                          {cntr.waiting_count}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           </div>
 
           <p className="text-[11px] text-[#64748B] mt-3 pt-3 border-t border-[#F1F5F9]">
-            Physical hardware status is synchronized in real-time over local branch network.
+            Counters dynamically pull tokens matching their specialized service capabilities.
           </p>
         </div>
       </div>
+
+      {/* ==================================================================== */}
+      {/* ROW 5: ESP32 HARDWARE STATUS + RECENT HARDWARE EVENTS (Section 7,8,9) */}
+      {/* ==================================================================== */}
+      <ESP32ManagerPanel
+        hardwareStatus={telemetry?.hardware_status}
+        hardwareFlags={telemetry?.hardware_flags}
+        esp32Connected={esp32Connected}
+        esp32Ip={telemetry?.esp32_ip}
+      />
+
+      {/* ==================================================================== */}
+      {/* ROW 6: CROWD ALERTS + SYSTEM RECOMMENDATIONS (Section 10 & 11) */}
+      {/* ==================================================================== */}
+      <CrowdAlertRecommendation
+        crowdStatus={crowdStatus}
+        peopleDetected={peopleCount}
+        tokensWaiting={waitingTokens}
+        recommendation={telemetry?.recommendation}
+        currentThresholds={telemetry?.thresholds}
+      />
+
+      {/* ==================================================================== */}
+      {/* BOTTOM: DOWNLOADABLE REPORT (Section 12, 13, 14, 15) */}
+      {/* ==================================================================== */}
+      <DownloadableReportSection />
     </div>
   );
 };

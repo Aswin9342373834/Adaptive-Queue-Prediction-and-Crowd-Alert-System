@@ -5,6 +5,9 @@ __pycache__/
 *.so
 .pytest_cache/
 *.log
+*.db
+*.sqlite
+*.sqlite3
 
 # Virtual Environments
 .venv/
